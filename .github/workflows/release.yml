@@ -39,6 +39,8 @@ jobs:
           persist-credentials: false
       - run: bash scripts/build.sh "${TAG#v}"
       - run: bash tests/smoke.sh
+      - name: The smoke test must have recorded its WordPress version
+        run: '[ -s tests/out/wp-version.txt ] || { echo "tests/out/wp-version.txt is missing or empty" >&2; exit 1; }'
       - run: bash scripts/manifest.sh "${TAG#v}" "$(cat tests/out/wp-version.txt)" # the WordPress the smoke just ran on
       - run: gh release create "$TAG" dist/puzzles-site-reports.zip dist/manifest.json --prerelease --generate-notes
         env:

@@ -16,7 +16,7 @@ wp plugin install puzzles-site-reports.zip --activate
 
 ## Connect
 
-In wp-admin, open **Tools → Puzzles Site Reports → Create connection**, or run
+In wp-admin, open **Tools → Site Reports → Create connection**, or run
 `wp puzzles-site-reports connect --porcelain`. Paste the string it prints into the portal's Report setup. It is shown
 once, and creating a new connection stops the previous one at once. The routes and the authentication are in
 [`docs/contract.md`](docs/contract.md).

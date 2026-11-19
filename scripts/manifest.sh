@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Usage: bash scripts/manifest.sh <version> [tested-wp]  ->  dist/manifest.json (the file the plugin's update check reads)
-# `requires` / `requires_php` come from the plugin header. `tested` is the newest WordPress the smoke test has run
-# against: bump the default below (or pass it) when that moves.
+# `requires` / `requires_php` come from the plugin header. `tested` is the WordPress version the smoke test ran on:
+# the release workflow passes tests/out/wp-version.txt (README, Release). The default below is only for local runs.
 set -euo pipefail
 V="${1:?usage: manifest.sh <version> [tested-wp]}"
 TESTED="${2:-6.9}"
+[[ "$TESTED" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "bad tested: $TESTED" >&2; exit 1; }
 [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad version: $V" >&2; exit 1; }
 cd "$(dirname "$0")/.."
 hdr() { sed -n "s/^ \* $1: *//p" puzzles-site-reports.php | head -1 | tr -d '\r'; }
