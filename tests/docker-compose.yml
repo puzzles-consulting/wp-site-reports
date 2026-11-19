@@ -1,4 +1,5 @@
 # Throwaway WordPress stack for tests/smoke.sh. Never left running: the script tears it down with `down -v`.
+name: puzzles-site-reports-smoke # fixed, so `down -v` can never touch another project's stack
 services:
   db:
     image: mariadb:11

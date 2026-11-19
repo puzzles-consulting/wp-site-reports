@@ -32,11 +32,28 @@ case_plugin_active() {
   [ "$(wpcli plugin get puzzles-site-reports --field=version)" = "$EXPECTED_VERSION" ]
 }
 
-for c in case_plugin_active case_auth case_status_fresh case_status_wordfence_and_updates \
-  case_seo_without_rank_math case_seo_with_rank_math case_update_offer; do
-  declare -F "$c" >/dev/null || continue
+# Fixed order (Task rulings). A new case is added to BOTH the function list and this one;
+# the check below fails on any mismatch, so a case can never be silently skipped.
+CASES=(case_plugin_active)
+# add, in this order, as their tasks land: case_auth case_status_fresh case_status_wordfence_and_updates
+#   case_seo_without_rank_math case_seo_with_rank_math case_update_offer
+
+for c in "${CASES[@]}"; do
+  declare -F "$c" >/dev/null || { echo "FAIL: listed case $c is not defined" >&2; exit 1; }
+done
+while read -r _ _ f; do
+  case "$f" in case_*)
+    [[ " ${CASES[*]} " == *" $f "* ]] || { echo "FAIL: defined case $f is not in CASES" >&2; exit 1; } ;;
+  esac
+done < <(declare -F)
+[ "${#CASES[@]}" -gt 0 ] || { echo "FAIL: no cases" >&2; exit 1; }
+
+ran=0
+for c in "${CASES[@]}"; do
   echo "== $c"
   "$c"
   echo "ok $c"
+  ran=$((ran + 1))
 done
-echo "smoke: all cases passed"
+[ "$ran" -gt 0 ] || { echo "FAIL: zero cases ran" >&2; exit 1; }
+echo "smoke: all $ran cases passed"

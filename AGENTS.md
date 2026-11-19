@@ -25,7 +25,8 @@ also on failure: never leave containers running. On Windows Git Bash `smoke.sh` 
 4. Responses never contain server paths, database names, table prefixes, the token or Wordfence's
    per-issue `data`. One fixed 401 (`puzzles_reports_unauthorized`) for every auth failure.
 5. A new behaviour gets a `case_*` function in `tests/smoke.sh` first; cases run in the order of the
-   loop at the bottom of that file.
+   `CASES` list at the bottom of that file (a defined case missing from it, or a listed one that is
+   undefined, fails the run).
 
 ## Pointers
 

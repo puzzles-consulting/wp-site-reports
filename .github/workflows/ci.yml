@@ -1,8 +1,13 @@
 name: CI
 on:
   pull_request:
+    paths-ignore: ['docs/**', '.claude/**', 'README.md', 'CHANGELOG.md', 'AGENTS.md']
   push:
     branches: [main]
+    paths-ignore: ['docs/**', '.claude/**', 'README.md', 'CHANGELOG.md', 'AGENTS.md']
+
+permissions:
+  contents: read
 
 jobs:
   lint:

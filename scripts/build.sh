@@ -5,10 +5,11 @@ V="${1:?usage: build.sh <version>}"
 cd "$(dirname "$0")/.."
 
 rm -rf dist && mkdir -p dist/stage/puzzles-site-reports
-# everything the plugin ships; dev files stay out
-tar --exclude=./dist --exclude=./.git --exclude=./.github --exclude=./.claude --exclude=./.superpowers \
-  --exclude=./tests --exclude=./scripts --exclude=./docs --exclude=./AGENTS.md --exclude=./.gitignore -cf - . |
-  tar -xf - -C dist/stage/puzzles-site-reports
+# allowlist: only these ship, whatever else sits in the working tree
+for f in puzzles-site-reports.php uninstall.php README.md CHANGELOG.md LICENSE; do
+  cp "$f" dist/stage/puzzles-site-reports/
+done
+[ ! -d includes ] || cp -r includes dist/stage/puzzles-site-reports/
 
 F=dist/stage/puzzles-site-reports/puzzles-site-reports.php
 sed -i -E "s/^( \* Version:).*/\1 $V/; s/(define\( 'PUZZLES_SITE_REPORTS_VERSION', ')[^']*(' \);)/\1$V\2/" "$F"
@@ -26,5 +27,13 @@ with zipfile.ZipFile('dist/puzzles-site-reports.zip', 'w', zipfile.ZIP_DEFLATED)
             z.write(p, os.path.relpath(p, root).replace(os.sep, '/'))
 PYEOF
 rm -rf dist/stage
+# the zip must hold nothing but puzzles-site-reports/ + the allowlist
+"$PY" - <<'PYEOF'
+import re, zipfile
+ok = re.compile(r'^puzzles-site-reports/(puzzles-site-reports\.php|uninstall\.php|README\.md|CHANGELOG\.md|LICENSE|includes/.+)$')
+bad = [n for n in zipfile.ZipFile('dist/puzzles-site-reports.zip').namelist() if not ok.match(n)]
+if bad:
+    raise SystemExit('unexpected zip entries: %s' % bad)
+PYEOF
 printf '%s' "$V" > dist/VERSION
 echo "built dist/puzzles-site-reports.zip ($V)"
