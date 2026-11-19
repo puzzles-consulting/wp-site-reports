@@ -4,7 +4,7 @@
 #   --src   the tree to build (default: this checkout); --out  where the zip goes (default: this checkout's dist/).
 # The zip is byte-reproducible: the same tree gives the same sha256 on any machine (entries sorted, fixed time and mode,
 # stored uncompressed because zlib output can differ between builds, no directory entries, Python isolated with -I).
-# scripts/promote.sh relies on it (its header).
+# scripts/promote.sh relies on it (its header): it rebuilds each tag with the build.sh of the owner's last promotion.
 # --test-overrides <file>: tests only (tests/smoke.sh). Each line "<CONSTANT> <value>" replaces one of the update
 # constants PUZZLES_SR_UPDATE_PUBKEY, PUZZLES_SITE_REPORTS_MANIFEST_URL or PUZZLES_SITE_REPORTS_PACKAGE_PREFIX in the
 # staged copy.
@@ -30,9 +30,11 @@ rm -rf "$OUT/stage" "$OUT/puzzles-site-reports.zip" && mkdir -p "$S"
 (cd "$SRC" && cp puzzles-site-reports.php uninstall.php README.md CHANGELOG.md LICENSE "$S/" && cp -r includes "$S/")
 
 F="$S/puzzles-site-reports.php"
-sed -i -E "s/^( \* Version:).*/\1 $V/; s/(define\( 'PUZZLES_SITE_REPORTS_VERSION', ')[^']*(' \);)/\1$V\2/" "$F"
-grep -q " \* Version: $V\$" "$F"
-grep -q "'PUZZLES_SITE_REPORTS_VERSION', '$V'" "$F"
+# Anchored: only these two whole lines are rewritten, and each must be there exactly once (scripts/promote.sh checks it
+# before the owner's review and repeats this rewrite).
+sed -i -E "s/^( \* Version:) +[0-9]+\.[0-9]+\.[0-9]+\$/\1 $V/; s/^(define\( 'PUZZLES_SITE_REPORTS_VERSION', ')[0-9]+\.[0-9]+\.[0-9]+(' \);)\$/\1$V\2/" "$F"
+[ "$(grep -cxF " * Version: $V" "$F")" = 1 ] || die "the main file needs exactly one ' * Version: X.Y.Z' line"
+[ "$(grep -cxF "define( 'PUZZLES_SITE_REPORTS_VERSION', '$V' );" "$F")" = 1 ] || die "the main file needs exactly one PUZZLES_SITE_REPORTS_VERSION define"
 
 if [ -n "$OVR" ]; then
   while read -r name val; do
@@ -41,8 +43,8 @@ if [ -n "$OVR" ]; then
       *) die "--test-overrides: '$name' is not an update constant" ;;
     esac
     [[ "$val" =~ ^[A-Za-z0-9+/=:._-]+$ ]] || die "--test-overrides: bad value for $name"
-    sed -i "s|^define( '$name', '[^']*' );|define( '$name', '$val' );|" "$F"
-    grep -qxF "define( '$name', '$val' );" "$F" || die "--test-overrides: $name not replaced"
+    sed -i "s|^define( '$name', '[^']*' );\$|define( '$name', '$val' );|" "$F"
+    [ "$(grep -cxF "define( '$name', '$val' );" "$F")" = 1 ] || die "--test-overrides: $name not replaced exactly once"
   done <"$OVR"
 fi
 
