@@ -158,10 +158,32 @@ case_status_wordfence_and_updates() {
   wpcli option update default_comment_status open
 }
 
+case_seo_without_rank_math() {
+  t=$(token_of "$(connect)"); [ "$(call seo "$t")" = 200 ]
+  jq -e '.plugin == null and .items == []' out/seo.json
+}
+
+case_seo_with_rank_math() {
+  wpcli plugin install seo-by-rank-math --activate
+  a=$(wpcli post create --post_type=page --post_status=publish --post_title=About --porcelain | tr -d '\r\n')
+  wpcli post meta update "$a" rank_math_focus_keyword 'roofing miami, roof repair'
+  wpcli post meta update "$a" rank_math_seo_score 81
+  wpcli post meta update "$a" rank_math_robots '["noindex"]' --format=json
+  b=$(wpcli post create --post_type=page --post_status=publish --post_title=Contact --post_name=contact-us --porcelain | tr -d '\r\n')
+  wpcli post meta update "$b" rank_math_focus_keyword '   '
+  wpcli post create --post_type=page --post_status=draft --post_title=Draft
+  t=$(token_of "$(connect)"); [ "$(call seo "$t")" = 200 ]
+  jq -e '.plugin.name == "rank_math" and (.plugin.version | type == "string")' out/seo.json
+  jq -e --argjson a "$a" '.items[] | select(.id == $a) | .focusKeywords == ["roofing miami","roof repair"] and .seoScore == 81 and .noindex == true and .metaTitle == null and .type == "page" and .title == "About" and (.url | type == "string")' out/seo.json
+  jq -e --argjson b "$b" '.items[] | select(.id == $b) | .focusKeywords == [] and .seoScore == null and .noindex == null' out/seo.json
+  jq -e '[.items[] | select(.title == "Draft")] | length == 0' out/seo.json
+  jq -e '.types.page.truncated == false and (.types | has("product") | not)' out/seo.json
+}
+
 # Fixed order (Task rulings). A new case is added to BOTH the function list and this one;
 # the check below fails on any mismatch, so a case can never be silently skipped.
-CASES=(case_plugin_active case_auth case_auth_locked_rest case_status_fresh case_status_wordfence_and_updates)
-# add, in this order, as their tasks land: case_seo_without_rank_math case_seo_with_rank_math case_update_offer
+CASES=(case_plugin_active case_auth case_auth_locked_rest case_status_fresh case_status_wordfence_and_updates case_seo_without_rank_math case_seo_with_rank_math)
+# add, in this order, as its task lands: case_update_offer
 
 for c in "${CASES[@]}"; do
   declare -F "$c" >/dev/null || { echo "FAIL: listed case $c is not defined" >&2; exit 1; }

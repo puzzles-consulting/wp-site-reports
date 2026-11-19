@@ -43,3 +43,27 @@ Reads what WordPress already knows. It never triggers an update check or a Wordf
 - `wordfence` is `null` when Wordfence is not installed (also when reading it fails). When it is installed but inactive, `active` is `false`, `issues` is `[]`, `ignored` is `0` and `lastScanAt` is `null`: its classes are not loaded. Otherwise `issues` are Wordfence's open (status `new`) scan results through its own `wfIssues` class, at most 200, ordered as Wordfence orders them (severity, highest first). `severity` is the integer Wordfence stores (100 critical, 75 high, 50 medium, 25 low). `shortMsg` is cut to 300 characters. `firstSeenAt` is when Wordfence first stored the issue. Wordfence's per-issue `data` is never returned. `ignored` counts the ignored issues. `lastScanAt` is Wordfence's own last-scan time, `null` if it never scanned. The plugin never starts a scan.
 - `comments.defaultStatus` is the site's `default_comment_status` (`open` or `closed`).
 - No server path, database name, table prefix or token appears in the response.
+
+## GET /seo
+
+Reads Rank Math's own post meta. It derives nothing, never resolves Rank Math's defaults, and does not depend on who the current user is.
+
+```json
+{
+  "plugin": { "name": "rank_math", "version": "1.0.230" },
+  "types": { "page": { "items": 42, "truncated": false }, "post": { "items": 500, "truncated": true } },
+  "items": [
+    { "id": 12, "type": "page", "url": "https://acme.com/about/", "title": "About",
+      "focusKeywords": ["roofing miami"], "seoScore": 81,
+      "metaTitle": null, "metaDescription": "...", "noindex": null }
+  ]
+}
+```
+
+- `plugin` is `null`, `types` is `{}` and `items` is `[]` when Rank Math is not active (network-active counts). No other SEO plugin is read.
+- Published `page` and `post`, and `product` when that post type exists, newest first, at most 500 per type. `types.<type>.items` is how many are returned and `truncated` is `true` when more than 500 exist.
+- `focusKeywords` is Rank Math's comma list, trimmed, empties dropped; `[]` when unset or blank.
+- `seoScore` is Rank Math's stored score as an integer, or `null`.
+- `metaTitle` and `metaDescription` are the post's own Rank Math values, or `null` when empty (the post uses Rank Math's template).
+- `noindex` is `true` or `false` when the post sets its own robots in Rank Math (`rank_math_robots` holds a non-empty list; `true` when it contains `noindex`). It is `null` when the post has none, i.e. it follows Rank Math's defaults for its type (not resolved here).
+- `title` is the post title with entities decoded; `url` is its permalink.

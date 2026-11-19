@@ -22,6 +22,7 @@ define( 'PUZZLES_SITE_REPORTS_OPTION', 'puzzles_site_reports_token' );
 define( 'PUZZLES_SITE_REPORTS_NAMESPACE', 'puzzles-reports/v1' );
 
 require_once __DIR__ . '/includes/status.php';
+require_once __DIR__ . '/includes/seo.php';
 
 /** Rotates the token. Returns the connection string, or a WP_Error if it could not be stored. Only the SHA-256 hash is stored. */
 function psr_create_connection() {
@@ -142,6 +143,7 @@ add_action(
 	'rest_api_init',
 	function () {
 		psr_register_route( '/status', 'psr_status' );
+		psr_register_route( '/seo', 'psr_seo' );
 	}
 );
 
