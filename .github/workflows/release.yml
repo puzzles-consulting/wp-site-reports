@@ -15,10 +15,10 @@ jobs:
       matrix:
         php: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
         with:
           php-version: ${{ matrix.php }}
       - run: find . -name '*.php' -not -path './tests/*' -print0 | xargs -0 -n1 php -l
@@ -33,7 +33,7 @@ jobs:
     steps:
       - name: Tag must be vX.Y.Z
         run: '[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad tag: $TAG" >&2; exit 1; }'
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - run: bash scripts/build.sh "${TAG#v}"

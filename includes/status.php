@@ -25,7 +25,20 @@ function puzzles_sr_updates_checked_at( array $transients ): ?string {
 	return puzzles_sr_iso( $oldest );
 }
 
-/** Wordfence's own open issues, ignored count and last scan; null when it is not installed. Never starts a scan. */
+/** $s without absolute server paths: the content dir becomes "wp-content", the install root and its parent disappear, then any other absolute path. */
+function puzzles_sr_scrub_paths( string $s ): string {
+	$s = str_replace( WP_CONTENT_DIR, 'wp-content', $s );
+	foreach ( array_unique( array( untrailingslashit( ABSPATH ), untrailingslashit( (string) realpath( ABSPATH ) ), dirname( ABSPATH ) ) ) as $root ) {
+		if ( strlen( $root ) > 1 ) { // never "/" or "": that would eat every slash
+			$s = str_replace( array( $root . '/', $root ), '', $s );
+		}
+	}
+	// What is left: a Unix (/a/b) or Windows (C:\a, \\host\a) absolute path, starting the text or after a space, quote,
+	// bracket, "=" or ",". A URL's "//" follows a ":" and is kept.
+	return (string) preg_replace( '~(?<![^\s"\'(\[=,])(?:[A-Za-z]:)?[\\\\/][^\s"\'<>]+~', '', $s );
+}
+
+/** Wordfence's own open issues, ignored count and last scan; null when it is not installed, or active but unreadable. Never starts a scan. */
 function puzzles_sr_wordfence( array $plugins ): ?array {
 	$file = 'wordfence/wordfence.php';
 	if ( ! isset( $plugins[ $file ] ) ) {
@@ -33,60 +46,59 @@ function puzzles_sr_wordfence( array $plugins ): ?array {
 	}
 	$out = array(
 		'version'    => (string) $plugins[ $file ]['Version'],
-		'active'     => puzzles_sr_plugin_active( $file ),
+		'active'     => is_plugin_active( $file ),
 		'lastScanAt' => null,
 		'issues'     => array(),
 		'ignored'    => 0,
 	);
-	// Wordfence's classes exist only while it is active and loaded; its public wfIssues / wfScanner methods
-	// are used instead of its tables. getIssues() hydrates each issue (including its per-issue `data`): only four fields leave here.
-	if ( $out['active'] && class_exists( 'wfIssues' ) && class_exists( 'wfScanner' ) ) {
-		try {
-			$out['lastScanAt'] = puzzles_sr_iso( wfScanner::shared()->lastScanTime() );
-			$issues            = new wfIssues();
-			$found             = $issues->getIssues( 0, 200, 0, 0 );
-			foreach ( isset( $found['new'] ) ? (array) $found['new'] : array() as $i ) {
-				if ( count( $out['issues'] ) >= 200 ) {
-					break;
-				}
-				$out['issues'][] = array(
-					'type'        => (string) $i['type'],
-					'severity'    => (int) $i['severity'], // Wordfence's own: 100 critical, 75 high, 50 medium, 25 low
-					// No absolute server path leaves: the content dir becomes "wp-content", the install root disappears (before the cut). Plain text first, like /seo.
-					'shortMsg'    => mb_substr( str_replace( array( WP_CONTENT_DIR, ABSPATH ), array( 'wp-content', '' ), (string) puzzles_sr_plain( $i['shortMsg'] ) ), 0, 300 ),
-					'firstSeenAt' => puzzles_sr_iso( isset( $i['time'] ) ? $i['time'] : null ),
-				);
-			}
-			$counts         = $issues->getIssueCounts();
-			$out['ignored'] = (int) ( isset( $counts['ignoreP'] ) ? $counts['ignoreP'] : 0 ) + (int) ( isset( $counts['ignoreC'] ) ? $counts['ignoreC'] : 0 );
-		} catch ( Throwable $e ) {
+	if ( ! $out['active'] ) {
+		return $out; // its classes are not loaded: nothing to read
+	}
+	// Active but unreadable (a Wordfence change) is null, never "no issues". The filter is test-only: it forces that path.
+	if ( ! class_exists( 'wfIssues' ) || ! class_exists( 'wfScanner' ) || ! apply_filters( 'puzzles_sr_wordfence_reader_ok', true ) ) {
+		return null;
+	}
+	// Wordfence's public wfIssues / wfScanner methods instead of its tables. getIssues() hydrates each issue (including its
+	// per-issue `data`): only four fields leave here. Its own query is LIMIT 200.
+	try {
+		$issues = new wfIssues();
+		$found  = $issues->getIssues( 0, 200, 0, 0 );
+		$counts = $issues->getIssueCounts();
+		if ( ! is_array( $found['new'] ?? null ) || ! is_array( $counts ) ) {
 			return null;
 		}
+		$out['lastScanAt'] = puzzles_sr_iso( wfScanner::shared()->lastScanTime() );
+		foreach ( $found['new'] as $i ) {
+			$out['issues'][] = array(
+				'type'        => (string) $i['type'],
+				'severity'    => (int) $i['severity'], // Wordfence's own: 100 critical, 75 high, 50 medium, 25 low
+				// Plain text first (like /seo), then no server path, then the cut.
+				'shortMsg'    => mb_substr( puzzles_sr_scrub_paths( (string) puzzles_sr_plain( $i['shortMsg'] ) ), 0, 300 ),
+				'firstSeenAt' => puzzles_sr_iso( $i['time'] ?? null ),
+			);
+		}
+		$out['ignored'] = (int) ( $counts['ignoreP'] ?? 0 ) + (int) ( $counts['ignoreC'] ?? 0 );
+	} catch ( Throwable $e ) {
+		return null;
 	}
 	return $out;
-}
-
-function puzzles_sr_plugin_active( string $file ): bool {
-	return is_plugin_active( $file ) || is_plugin_active_for_network( $file );
 }
 
 function puzzles_sr_status(): array {
 	require_once ABSPATH . 'wp-admin/includes/plugin.php'; // REST requests do not load it
 
-	$core_t    = get_site_transient( 'update_core' );
-	$plugins_t = get_site_transient( 'update_plugins' );
-	$themes_t  = get_site_transient( 'update_themes' );
+	$core_t       = get_site_transient( 'update_core' );
+	$plugins_t    = get_site_transient( 'update_plugins' );
+	$themes_t     = get_site_transient( 'update_themes' );
+	$plugin_offer = $plugins_t->response ?? array();
+	$theme_offer  = $themes_t->response ?? array();
 
 	$core_update = null;
-	if ( is_object( $core_t ) && ! empty( $core_t->updates ) && is_array( $core_t->updates ) ) {
-		foreach ( $core_t->updates as $offer ) { // the first real upgrade offer, wherever it sits in the list
-			if ( is_object( $offer ) && isset( $offer->response ) && 'upgrade' === $offer->response ) {
-				$version = isset( $offer->current ) ? $offer->current : ( isset( $offer->version ) ? $offer->version : null );
-				if ( is_string( $version ) && '' !== $version ) {
-					$core_update = $version;
-					break;
-				}
-			}
+	foreach ( is_array( $core_t->updates ?? null ) ? $core_t->updates : array() as $offer ) { // the first real upgrade offer, wherever it sits in the list
+		$version = is_object( $offer ) && 'upgrade' === ( $offer->response ?? null ) ? ( $offer->current ?? $offer->version ?? null ) : null;
+		if ( is_string( $version ) && '' !== $version ) {
+			$core_update = $version;
+			break;
 		}
 	}
 
@@ -94,13 +106,13 @@ function puzzles_sr_status(): array {
 	$auto = (array) get_site_option( 'auto_update_plugins', array() );
 	$list = array();
 	foreach ( $all as $file => $p ) {
-		$offer  = is_object( $plugins_t ) && isset( $plugins_t->response[ $file ]->new_version ) ? (string) $plugins_t->response[ $file ]->new_version : null;
+		$offer  = $plugin_offer[ $file ]->new_version ?? null;
 		$list[] = array(
 			'file'       => (string) $file,
 			'name'       => (string) $p['Name'],
 			'version'    => (string) $p['Version'],
-			'active'     => puzzles_sr_plugin_active( $file ),
-			'update'     => $offer,
+			'active'     => is_plugin_active( $file ), // network-active counts
+			'update'     => null === $offer ? null : (string) $offer,
 			'autoUpdate' => in_array( $file, $auto, true ),
 		);
 	}
@@ -117,9 +129,8 @@ function puzzles_sr_status(): array {
 	$themes = array();
 	$active = get_stylesheet();
 	foreach ( wp_get_themes() as $stylesheet => $t ) {
-		$entry    = is_object( $themes_t ) && isset( $themes_t->response[ $stylesheet ] ) ? $themes_t->response[ $stylesheet ] : null;
-		$entry    = is_object( $entry ) ? (array) $entry : $entry; // core stores arrays, a third-party updater may store objects
-		$offer    = is_array( $entry ) && isset( $entry['new_version'] ) && is_scalar( $entry['new_version'] ) ? (string) $entry['new_version'] : null;
+		$entry    = (array) ( $theme_offer[ $stylesheet ] ?? array() ); // core stores arrays, a third-party updater may store objects
+		$offer    = is_scalar( $entry['new_version'] ?? null ) ? (string) $entry['new_version'] : null;
 		$template = $t->get_template();
 		$themes[] = array(
 			'stylesheet' => (string) $stylesheet,

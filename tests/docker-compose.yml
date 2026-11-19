@@ -20,7 +20,7 @@ services:
         condition: service_healthy
     ports:
       - "8080:80"
-    environment:
+    environment: &wp-db # wp-config.php reads these from the environment
       WORDPRESS_DB_HOST: db
       WORDPRESS_DB_NAME: wp
       WORDPRESS_DB_USER: wp
@@ -33,11 +33,7 @@ services:
     profiles: ["cli"]
     depends_on:
       - wp
-    environment: # wp-config.php reads these from the environment
-      WORDPRESS_DB_HOST: db
-      WORDPRESS_DB_NAME: wp
-      WORDPRESS_DB_USER: wp
-      WORDPRESS_DB_PASSWORD: wp
+    environment: *wp-db
     volumes:
       - wpdata:/var/www/html
       - ../dist:/dist:ro

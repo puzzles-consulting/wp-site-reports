@@ -32,9 +32,7 @@ function puzzles_sr_plain( $v ): ?string {
 
 /** Whether a REST route (as requested) is this plugin's namespace or below it. Core matches routes case-insensitively, so this does too. */
 function puzzles_sr_is_our_route( string $route ): bool {
-	$route = '/' . trim( $route, '/' );
-	$ns    = '/' . PUZZLES_SITE_REPORTS_NAMESPACE;
-	return 0 === strcasecmp( $route, $ns ) || 0 === strncasecmp( $route, $ns . '/', strlen( $ns ) + 1 );
+	return 0 === stripos( '/' . trim( $route, '/' ) . '/', '/' . PUZZLES_SITE_REPORTS_NAMESPACE . '/' );
 }
 
 require_once __DIR__ . '/includes/status.php';
@@ -61,25 +59,28 @@ function puzzles_sr_create_connection() {
 function puzzles_sr_disconnect(): void {
 	delete_option( PUZZLES_SITE_REPORTS_OPTION );
 }
+// Deactivating the plugin revokes the connection. (Core deactivates silently while it updates a plugin: no hook runs, the token survives.)
+register_deactivation_hook( __FILE__, 'puzzles_sr_disconnect' );
 
 /** The stored { hash, createdAt }, or null when not connected. */
 function puzzles_sr_connection(): ?array {
 	$o = get_option( PUZZLES_SITE_REPORTS_OPTION );
-	return is_array( $o ) && isset( $o['hash'] ) && is_string( $o['hash'] ) ? $o : null;
+	return is_array( $o ) && is_string( $o['hash'] ?? null ) && is_string( $o['createdAt'] ?? null ) ? $o : null;
 }
 
 function puzzles_sr_token_valid( $token ): bool {
 	$c = puzzles_sr_connection();
-	return $c && is_string( $token ) && '' !== $token && hash_equals( $c['hash'], hash( 'sha256', $token ) );
+	return $c && is_string( $token ) && hash_equals( $c['hash'], hash( 'sha256', $token ) );
+}
+
+/** One fixed refusal for every cause (no token, wrong token, not connected). */
+function puzzles_sr_unauthorized(): WP_Error {
+	return new WP_Error( 'puzzles_reports_unauthorized', 'Not authorized.', array( 'status' => 401 ) );
 }
 
 /** @return true|WP_Error */
 function puzzles_sr_authorized( WP_REST_Request $request ) {
-	// One fixed refusal for every cause (no token, wrong token, not connected).
-	if ( puzzles_sr_token_valid( $request->get_header( 'X-Puzzles-Reports-Token' ) ) ) {
-		return true;
-	}
-	return new WP_Error( 'puzzles_reports_unauthorized', 'Not authorized.', array( 'status' => 401 ) );
+	return puzzles_sr_token_valid( $request->get_header( 'X-Puzzles-Reports-Token' ) ) ? true : puzzles_sr_unauthorized();
 }
 
 function puzzles_sr_register_route( string $route, callable $callback ): void {
@@ -92,7 +93,7 @@ function puzzles_sr_register_route( string $route, callable $callback ): void {
 			'permission_callback' => 'puzzles_sr_authorized',
 			'callback'            => function ( $request ) use ( $callback ) {
 				try {
-					return call_user_func( $callback, $request );
+					return $callback( $request );
 				} catch ( Throwable $e ) {
 					error_log( 'Puzzles Site Reports: ' . get_class( $e ) . ' in ' . $request->get_route() ); // class and route only, never the message
 					return new WP_Error( 'puzzles_reports_failed', 'The report could not be built.', array( 'status' => 500 ) );
@@ -114,7 +115,8 @@ add_filter(
 	3
 );
 
-// Core's index lists every namespace even when its routes are hidden: drop ours. (A direct request to
+// Core's index lists every namespace, and the namespace's own index route (/puzzles-reports/v1, which core registers
+// with the first route), even when our routes are hidden (show_in_index => false): drop both. (A direct request to
 // /puzzles-reports/v1 is still answered by core, so the plugin's presence is not fully hidden.)
 add_filter(
 	'rest_index',
@@ -123,10 +125,10 @@ add_filter(
 			return $response;
 		}
 		$d = $response->get_data();
-		if ( isset( $d['namespaces'] ) && is_array( $d['namespaces'] ) ) {
+		if ( is_array( $d['namespaces'] ?? null ) ) {
 			$d['namespaces'] = array_values( array_diff( $d['namespaces'], array( PUZZLES_SITE_REPORTS_NAMESPACE ) ) );
 		}
-		if ( isset( $d['routes'] ) && is_array( $d['routes'] ) ) {
+		if ( is_array( $d['routes'] ?? null ) ) {
 			foreach ( array_keys( $d['routes'] ) as $r ) {
 				if ( puzzles_sr_is_our_route( (string) $r ) ) {
 					unset( $d['routes'][ $r ] );
@@ -138,17 +140,17 @@ add_filter(
 	}
 );
 
-// Another plugin or snippet may refuse every unauthenticated REST request (it runs before permission_callback).
-// Our routes answer to the token alone: pass only a request for our namespace that carries a valid token; never touch anything else.
+// Another plugin or snippet may refuse every unauthenticated REST request (it runs before permission_callback). Our
+// routes answer to the token alone: a request for our namespace passes with a valid token and gets our own fixed 401
+// without one, whatever an earlier filter returned, so the portal can tell "bad token" from "this site blocks REST".
+// Nothing else is touched. A filter running after priority 999 can still override this.
 add_filter(
 	'rest_authentication_errors',
 	function ( $result ) {
-		$route = isset( $GLOBALS['wp']->query_vars['rest_route'] ) ? (string) $GLOBALS['wp']->query_vars['rest_route'] : '';
-		$token = isset( $_SERVER['HTTP_X_PUZZLES_REPORTS_TOKEN'] ) ? $_SERVER['HTTP_X_PUZZLES_REPORTS_TOKEN'] : '';
-		if ( puzzles_sr_is_our_route( $route ) && puzzles_sr_token_valid( $token ) ) {
-			return true;
+		if ( ! puzzles_sr_is_our_route( (string) ( $GLOBALS['wp']->query_vars['rest_route'] ?? '' ) ) ) {
+			return $result;
 		}
-		return $result;
+		return puzzles_sr_token_valid( $_SERVER['HTTP_X_PUZZLES_REPORTS_TOKEN'] ?? '' ) ? true : puzzles_sr_unauthorized();
 	},
 	999
 );
@@ -260,26 +262,28 @@ add_filter(
 );
 
 // ---- Admin page: Tools > Site Reports ----
+/** On a multisite only a network admin: a sub-site admin must not read network-wide data. */
+function puzzles_sr_capability(): string {
+	return is_multisite() ? 'manage_network_options' : 'manage_options';
+}
+
 add_action(
 	'admin_menu',
 	function () {
-		add_management_page( 'Puzzles Site Reports', 'Site Reports', 'manage_options', 'puzzles-site-reports', 'puzzles_sr_admin_page' );
+		// Core refuses the page to anyone without the capability before the callback runs.
+		add_management_page( 'Puzzles Site Reports', 'Site Reports', puzzles_sr_capability(), 'puzzles-site-reports', 'puzzles_sr_admin_page' );
 	}
 );
 
 function puzzles_sr_admin_page(): void {
-	if ( ! current_user_can( 'manage_options' ) ) {
-		wp_die( 'Not allowed.' );
-	}
 	$string = '';
 	$notice = '';
-	if ( 'POST' === $_SERVER['REQUEST_METHOD'] && isset( $_POST['puzzles_sr_action'] ) ) {
-		if ( 'connect' === $_POST['puzzles_sr_action'] ) {
+	$action = $_POST['puzzles_sr_action'] ?? '';
+	if ( 'POST' === $_SERVER['REQUEST_METHOD'] && '' !== $action && current_user_can( puzzles_sr_capability() ) ) {
+		if ( 'connect' === $action ) {
 			check_admin_referer( 'puzzles_sr_connect' );
-			$cur  = puzzles_sr_connection();
-			$now  = $cur && isset( $cur['createdAt'] ) ? (string) $cur['createdAt'] : '';
-			$seen = isset( $_POST['puzzles_sr_seen'] ) ? sanitize_text_field( wp_unslash( $_POST['puzzles_sr_seen'] ) ) : '';
-			if ( $seen !== $now ) { // a reload or a second click: the string already pasted into the portal stays valid
+			$seen = sanitize_text_field( wp_unslash( $_POST['puzzles_sr_seen'] ?? '' ) );
+			if ( $seen !== ( puzzles_sr_connection()['createdAt'] ?? '' ) ) { // a reload or a second click: the string already pasted into the portal stays valid
 				$notice = 'A connection was already created; create a new one?';
 			} else {
 				$r = puzzles_sr_create_connection();
@@ -289,25 +293,29 @@ function puzzles_sr_admin_page(): void {
 					$string = $r;
 				}
 			}
-		} elseif ( 'disconnect' === $_POST['puzzles_sr_action'] ) {
+		} elseif ( 'disconnect' === $action ) {
 			check_admin_referer( 'puzzles_sr_disconnect' );
 			puzzles_sr_disconnect();
 		}
 	}
-	$c = puzzles_sr_connection();
+	$c    = puzzles_sr_connection();
+	$seen = $c['createdAt'] ?? '';
 	echo '<div class="wrap"><h1>Puzzles Site Reports</h1>';
 	echo '<p>Version ' . esc_html( PUZZLES_SITE_REPORTS_VERSION ) . '</p>';
-	echo '<p>' . ( $c ? 'Connected since ' . esc_html( isset( $c['createdAt'] ) ? $c['createdAt'] : '' ) : 'Not connected' ) . '</p>';
+	echo '<p>' . ( $c ? 'Connected since ' . esc_html( $seen ) : 'Not connected' ) . '</p>';
+	if ( ! is_ssl() ) {
+		echo '<div class="notice notice-warning inline"><p>This page is not on HTTPS: the connection string, and the token in it, would travel unencrypted. The portal refuses sites without HTTPS.</p></div>';
+	}
 	if ( $notice ) {
 		echo '<div class="notice notice-warning inline"><p>' . esc_html( $notice ) . '</p></div>';
 	}
 	if ( $string ) {
 		echo '<p><input type="text" id="puzzles-sr-string" class="large-text code" readonly value="' . esc_attr( $string ) . '"> ';
-		echo '<button type="button" class="button" onclick="navigator.clipboard.writeText(document.getElementById(\'puzzles-sr-string\').value)">Copy</button></p>';
+		// navigator.clipboard exists only on HTTPS; a plain-http admin copies the selection instead.
+		echo '<button type="button" class="button" onclick="var i=document.getElementById(\'puzzles-sr-string\');i.select();if(navigator.clipboard){navigator.clipboard.writeText(i.value)}else{document.execCommand(\'copy\')}">Copy</button></p>';
 		echo '<p>This string is shown once. Paste it into the portal\'s Report setup.</p>';
 	}
-	$seen = $c && isset( $c['createdAt'] ) ? (string) $c['createdAt'] : '';
-	$ask  = $c ? ' onsubmit="return confirm(' . esc_attr( wp_json_encode( 'This disconnects the current portal connection.' ) ) . ')"' : '';
+	$ask = $c ? ' onsubmit="return confirm(' . esc_attr( wp_json_encode( 'This disconnects the current portal connection.' ) ) . ')"' : '';
 	echo '<form method="post"' . $ask . '>';
 	wp_nonce_field( 'puzzles_sr_connect' );
 	echo '<input type="hidden" name="puzzles_sr_action" value="connect"><input type="hidden" name="puzzles_sr_seen" value="' . esc_attr( $seen ) . '"><button class="button button-primary">Create connection</button></form>';
@@ -344,7 +352,7 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			$c = puzzles_sr_connection();
 			WP_CLI::line( 'version: ' . PUZZLES_SITE_REPORTS_VERSION );
 			WP_CLI::line( 'connected: ' . ( $c ? 'yes' : 'no' ) );
-			if ( $c && isset( $c['createdAt'] ) ) {
+			if ( $c ) {
 				WP_CLI::line( 'createdAt: ' . $c['createdAt'] );
 			}
 		}

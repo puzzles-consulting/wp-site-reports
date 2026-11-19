@@ -16,7 +16,7 @@ const PUZZLES_SR_SEO_KEYS  = array( 'rank_math_focus_keyword', 'rank_math_seo_sc
 
 /** true / false when the post sets its own Rank Math robots, null when it follows Rank Math's defaults. */
 function puzzles_sr_noindex( $raw ): ?bool {
-	$r = is_string( $raw ) ? maybe_unserialize( $raw ) : $raw; // an array; a serialized string is read too
+	$r = maybe_unserialize( $raw ); // an array; a serialized string is read too
 	if ( is_string( $r ) && '' !== $r ) {
 		$r = array( $r );
 	}
@@ -46,7 +46,7 @@ function puzzles_sr_seo_meta( array $ids ): array {
 function puzzles_sr_seo(): array {
 	require_once ABSPATH . 'wp-admin/includes/plugin.php'; // REST requests do not load it
 
-	if ( ! class_exists( 'RankMath' ) || ! puzzles_sr_plugin_active( 'seo-by-rank-math/rank-math.php' ) ) {
+	if ( ! class_exists( 'RankMath' ) || ! is_plugin_active( 'seo-by-rank-math/rank-math.php' ) ) {
 		return array( 'plugin' => null, 'types' => (object) array(), 'items' => array() );
 	}
 
@@ -77,20 +77,20 @@ function puzzles_sr_seo(): array {
 			$meta = puzzles_sr_seo_meta( $chunk );
 			_prime_post_caches( $chunk, true, false ); // the chunk's posts in one query, with their terms (a %category% permalink), without any meta
 			foreach ( $chunk as $id ) {
-				$m       = isset( $meta[ $id ] ) ? $meta[ $id ] : array();
-				$kw      = puzzles_sr_plain( isset( $m['rank_math_focus_keyword'] ) ? $m['rank_math_focus_keyword'] : null );
+				$m       = $meta[ $id ] ?? array();
+				$kw      = puzzles_sr_plain( $m['rank_math_focus_keyword'] ?? null );
 				$link    = get_permalink( $id );
-				$score   = isset( $m['rank_math_seo_score'] ) ? trim( (string) $m['rank_math_seo_score'] ) : '';
+				$score   = trim( (string) ( $m['rank_math_seo_score'] ?? '' ) );
 				$items[] = array(
 					'id'              => $id,
 					'type'            => $type,
-					'url'             => is_string( $link ) && '' !== $link ? $link : null,
+					'url'             => $link ?: null,
 					'title'           => (string) puzzles_sr_plain( get_post_field( 'post_title', $id, 'raw' ) ),
 					'focusKeywords'   => null === $kw ? array() : array_values( array_filter( array_map( 'trim', explode( ',', $kw ) ), 'strlen' ) ),
 					'seoScore'        => is_numeric( $score ) ? (int) $score : null,
-					'metaTitle'       => puzzles_sr_plain( isset( $m['rank_math_title'] ) ? $m['rank_math_title'] : null ),
-					'metaDescription' => puzzles_sr_plain( isset( $m['rank_math_description'] ) ? $m['rank_math_description'] : null ),
-					'noindex'         => puzzles_sr_noindex( isset( $m['rank_math_robots'] ) ? $m['rank_math_robots'] : null ),
+					'metaTitle'       => puzzles_sr_plain( $m['rank_math_title'] ?? null ),
+					'metaDescription' => puzzles_sr_plain( $m['rank_math_description'] ?? null ),
+					'noindex'         => puzzles_sr_noindex( $m['rank_math_robots'] ?? null ),
 				);
 				// A page builder's content can be megabytes: drop the post from the object cache now.
 				// (Not clean_post_cache(): for pages it runs one extra query per post to find children.)
