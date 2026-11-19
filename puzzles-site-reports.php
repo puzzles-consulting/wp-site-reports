@@ -27,8 +27,8 @@ define( 'PUZZLES_SITE_REPORTS_MANIFEST_URL', 'https://github.com/puzzles-consult
 define( 'PUZZLES_SITE_REPORTS_PACKAGE_PREFIX', 'https://github.com/puzzles-consulting/wp-site-reports/releases/download/' );
 // The most the update download reads, in bytes (5 MB); the zip is well under 1 MB.
 define( 'PUZZLES_SITE_REPORTS_MAX_PACKAGE', 5242880 );
-// Base64 Ed25519 public key of the release signing key (created 2026-11-19; the secret key is held outside GitHub).
-// A new key means a release that ships the new public key, signed with the old one (README, Release).
+// Base64 Ed25519 public key of the release signing key. A new key means a release that ships the new public key, signed
+// with the old one (README, Release).
 define( 'PUZZLES_SR_UPDATE_PUBKEY', 'FRx/KzeXTPzD6VBigvVottDDryTawD19IRq0FQ8uMXc=' );
 
 /** Plain text for the portal: no markup, entities decoded, trimmed; null when nothing is left. */
@@ -55,7 +55,7 @@ function puzzles_sr_create_connection() {
 		PUZZLES_SITE_REPORTS_OPTION,
 		array(
 			'hash'      => hash( 'sha256', $token ),
-			'createdAt' => gmdate( 'c' ),
+			'createdAt' => puzzles_sr_iso( time() ),
 		),
 		false
 	);
@@ -112,6 +112,7 @@ function puzzles_sr_register_route( string $route, callable $callback ): void {
 			'permission_callback' => 'puzzles_sr_authorized',
 			'callback'            => function ( $request ) use ( $callback ) {
 				try {
+					require_once ABSPATH . 'wp-admin/includes/plugin.php'; // REST requests do not load it
 					return $callback( $request );
 				} catch ( Throwable $e ) {
 					error_log( 'Puzzles Site Reports: ' . get_class( $e ) . ' in ' . $request->get_route() ); // class and route only, never the message
@@ -147,17 +148,22 @@ add_filter(
 		if ( is_array( $d['namespaces'] ?? null ) ) {
 			$d['namespaces'] = array_values( array_diff( $d['namespaces'], array( PUZZLES_SITE_REPORTS_NAMESPACE ) ) );
 		}
-		if ( is_array( $d['routes'] ?? null ) ) {
-			foreach ( array_keys( $d['routes'] ) as $r ) {
-				if ( puzzles_sr_is_our_route( (string) $r ) ) {
-					unset( $d['routes'][ $r ] );
-				}
-			}
-		}
+		unset( $d['routes'][ '/' . PUZZLES_SITE_REPORTS_NAMESPACE ] );
 		$response->set_data( $d );
 		return $response;
 	}
 );
+
+/**
+ * A report is for the token holder only: page caches must never store one (LiteSpeed Cache caches REST answers for a
+ * week by default, and serves them to anyone). DONOTCACHEPAGE is the convention most page caches honour.
+ */
+function puzzles_sr_no_page_cache(): void {
+	if ( ! defined( 'DONOTCACHEPAGE' ) ) {
+		define( 'DONOTCACHEPAGE', true );
+	}
+	do_action( 'litespeed_control_set_nocache', 'puzzles-site-reports' );
+}
 
 // Another plugin or snippet may refuse every unauthenticated REST request (it runs before permission_callback). Our
 // routes answer to the token alone: a request for our namespace passes with a valid token and gets our own fixed 401
@@ -169,6 +175,7 @@ add_filter(
 		if ( ! puzzles_sr_is_our_route( (string) ( $GLOBALS['wp']->query_vars['rest_route'] ?? '' ) ) ) {
 			return $result;
 		}
+		puzzles_sr_no_page_cache();
 		return puzzles_sr_token_valid( $_SERVER['HTTP_X_PUZZLES_REPORTS_TOKEN'] ?? '' ) ? true : puzzles_sr_unauthorized();
 	},
 	999
@@ -187,7 +194,8 @@ add_action(
 // answer in the update_plugins transient, so nothing is cached here. Any failure leaves WordPress' answer untouched.
 // A manifest counts only when its Ed25519 signature over all its fields verifies with PUZZLES_SR_UPDATE_PUBKEY (top of
 // this file), and the package is installed only when it hashes to the signed sha256. The signing key never lives in
-// GitHub (README, Release): write access to the repository alone cannot ship a zip to the sites.
+// GitHub (README, Release): write access to the repository alone cannot ship a zip to the sites. At most 4 KB of the
+// manifest is read.
 
 /**
  * The manifest when every signed field is well formed and the signature verifies, else null. The signed message is the
@@ -231,7 +239,7 @@ function puzzles_sr_update_offer( $update, $plugin_data, $plugin_file ) {
 	if ( plugin_basename( __FILE__ ) !== $plugin_file ) {
 		return $update;
 	}
-	$res = wp_remote_get( PUZZLES_SITE_REPORTS_MANIFEST_URL, array( 'timeout' => wp_doing_cron() ? 10 : 3 ) );
+	$res = wp_remote_get( PUZZLES_SITE_REPORTS_MANIFEST_URL, array( 'timeout' => wp_doing_cron() ? 10 : 3, 'limit_response_size' => 4096 ) );
 	if ( is_wp_error( $res ) || 200 !== (int) wp_remote_retrieve_response_code( $res ) ) {
 		return $update;
 	}
@@ -348,9 +356,7 @@ function puzzles_sr_admin_page(): void {
 		echo '<div class="notice notice-warning inline"><p>' . esc_html( $notice ) . '</p></div>';
 	}
 	if ( $string ) {
-		echo '<p><input type="text" id="puzzles-sr-string" class="large-text code" readonly value="' . esc_attr( $string ) . '"> ';
-		// navigator.clipboard exists only on HTTPS; a plain-http admin copies the selection instead.
-		echo '<button type="button" class="button" onclick="var i=document.getElementById(\'puzzles-sr-string\');i.select();if(navigator.clipboard){navigator.clipboard.writeText(i.value)}else{document.execCommand(\'copy\')}">Copy</button></p>';
+		echo '<p><input type="text" class="large-text code" readonly value="' . esc_attr( $string ) . '"></p>';
 		echo '<p>This string is shown once. Paste it into the portal\'s Report setup.</p>';
 	}
 	$ask = $c ? ' onsubmit="return confirm(' . esc_attr( wp_json_encode( 'This disconnects the current portal connection.' ) ) . ')"' : '';

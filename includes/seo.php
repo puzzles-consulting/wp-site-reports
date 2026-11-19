@@ -16,10 +16,7 @@ const PUZZLES_SR_SEO_KEYS  = array( 'rank_math_focus_keyword', 'rank_math_seo_sc
 
 /** true / false when the post sets its own Rank Math robots, null when it follows Rank Math's defaults. */
 function puzzles_sr_noindex( $raw ): ?bool {
-	$r = maybe_unserialize( $raw ); // an array; a serialized string is read too
-	if ( is_string( $r ) && '' !== $r ) {
-		$r = array( $r );
-	}
+	$r = maybe_unserialize( $raw ); // Rank Math stores an array
 	return is_array( $r ) && $r ? in_array( 'noindex', $r, true ) : null;
 }
 
@@ -44,8 +41,6 @@ function puzzles_sr_seo_meta( array $ids ): array {
 }
 
 function puzzles_sr_seo(): array {
-	require_once ABSPATH . 'wp-admin/includes/plugin.php'; // REST requests do not load it
-
 	if ( ! class_exists( 'RankMath' ) || ! is_plugin_active( 'seo-by-rank-math/rank-math.php' ) ) {
 		return array( 'plugin' => null, 'types' => (object) array(), 'items' => array() );
 	}

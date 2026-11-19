@@ -165,7 +165,27 @@ case_deactivation_revokes() { # deactivating deletes the token; reactivating doe
   [ "$(call status "$t")" = 401 ]
 }
 
-case_status_fresh() { # no update check has run yet
+case_no_page_cache() { # page caches never store a report: DONOTCACHEPAGE and LiteSpeed's no-cache, on our routes only
+  put_mu psr-cache.php '<?php
+add_action( "litespeed_control_set_nocache", function ( $why ) { $GLOBALS["psr_ls_nocache"] = $why; } );
+add_filter( "rest_post_dispatch", function ( $r ) {
+	if ( $r instanceof WP_HTTP_Response ) {
+		$r->header( "X-Test-Donotcachepage", defined( "DONOTCACHEPAGE" ) && DONOTCACHEPAGE ? "1" : "0" );
+		$r->header( "X-Test-Litespeed-Nocache", (string) ( $GLOBALS["psr_ls_nocache"] ?? "" ) );
+	}
+	return $r;
+}, 99 );'
+  t=$(fresh_token)
+  h=$(curl -s -D - -o /dev/null -H "X-Puzzles-Reports-Token: $t" 'http://localhost:8080/?rest_route=/puzzles-reports/v1/status')
+  grep -qi '^x-test-donotcachepage: 1' <<<"$h"; grep -qi '^x-test-litespeed-nocache: puzzles-site-reports' <<<"$h"
+  h=$(curl -s -D - -o /dev/null 'http://localhost:8080/?rest_route=/puzzles-reports/v1/seo') # the 401 too
+  grep -qi '^x-test-donotcachepage: 1' <<<"$h"
+  h=$(curl -s -D - -o /dev/null 'http://localhost:8080/?rest_route=/wp/v2/types') # nothing else is touched
+  grep -qi '^x-test-donotcachepage: 0' <<<"$h"
+  rm_mu psr-cache.php
+}
+
+case_status_fresh() { # no update check has run yet, then only failed ones
   delete_update_transients
   t=$(fresh_token); [ "$(call status "$t")" = 200 ]
   jq -e '.companion.version == env.EXPECTED_VERSION' out/status.json
@@ -174,6 +194,13 @@ case_status_fresh() { # no update check has run yet
   jq -e '.plugins[] | select(.file == "puzzles-site-reports/puzzles-site-reports.php") | .active == true' out/status.json
   jq -e '.wordfence == null and .comments.defaultStatus == "open"' out/status.json
   ! grep -q '/var/www' out/status.json || return 1
+  # checks that fail (api.wordpress.org unreachable) stamp last_checked but store nothing: still unknown
+  put_mu psr-offline.php '<?php add_filter( "pre_http_request", function ( $r, $a, $u ) { return false !== strpos( $u, "api.wordpress.org" ) ? new WP_Error( "offline", "offline" ) : $r; }, 10, 3 );'
+  wpcli eval 'wp_update_plugins(); wp_update_themes(); wp_version_check();'
+  [ "$(wpcli eval 'echo (int) ! empty( get_site_transient( "update_plugins" )->last_checked );' | tr -d '\r\n')" = 1 ]
+  [ "$(call status "$t")" = 200 ]
+  jq -e '.wordpress.updatesCheckedAt == null' out/status.json
+  rm_mu psr-offline.php; delete_update_transients
 }
 
 case_status_wordfence_and_updates() {
@@ -186,7 +213,10 @@ case_status_wordfence_and_updates() {
   wpcli eval '
     $d = get_theme_root() . "/psr-child"; wp_mkdir_p( $d );
     file_put_contents( $d . "/style.css", "/*\nTheme Name: PSR Child\nTemplate: twentytwentyone\nVersion: 0.1\n*/" );
-    file_put_contents( $d . "/index.php", "<?php // Silence is golden." );'
+    file_put_contents( $d . "/index.php", "<?php // Silence is golden." );
+    $n = get_theme_root() . "/123"; wp_mkdir_p( $n ); // a numeric folder name: an integer array key in PHP
+    file_put_contents( $n . "/style.css", "/*\nTheme Name: Numeric\nVersion: 1.0\n*/" );
+    file_put_contents( $n . "/index.php", "<?php // Silence is golden." );'
   put_mu psr-test-mu.php '<?php
 /*
 Plugin Name: PSR Test MU
@@ -211,7 +241,7 @@ Version: 1.2.3
     wfScanner::shared()->recordLastScanTime();'
   t=$(fresh_token); [ "$(call status "$t")" = 200 ]
   jq -e '.wordfence.ignored == 1 and (.wordfence.lastScanAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$"))' out/status.json
-  jq -e '.wordfence.issues | length == 2 and .[0].type == "wfPluginUpgrade" and .[0].severity == 75 and .[0].shortMsg == "PSR-short-marker & bold in wp-content/plugins/x.php" and (.[0].firstSeenAt | type == "string") and (.[0] | keys | sort) == ["firstSeenAt","severity","shortMsg","type"]' out/status.json
+  jq -e '.wordfence.issues | length == 2 and .[0].type == "wfPluginUpgrade" and .[0].severity == 75 and .[0].shortMsg == "PSR-short-marker & bold in wp-content/plugins/x.php" and (.[0].detectedAt | type == "string") and (.[0] | keys | sort) == ["detectedAt","severity","shortMsg","type"]' out/status.json
   jq -e '.wordfence.issues[1] | .severity == 25 and .shortMsg == "PSR-path-marker wp-config.php and  and  end"' out/status.json
   ! grep -q 'PSR-long-marker' out/status.json || return 1               # shortMsg, never longMsg
   ! grep -q 'private-data' out/status.json || return 1                  # Wordfence's per-issue data never leaves
@@ -230,6 +260,7 @@ Version: 1.2.3
   jq -e '.plugins[] | select(.file == "puzzles-site-reports/puzzles-site-reports.php") | .autoUpdate == false' out/status.json
   jq -e '.themes[] | select(.stylesheet == "twentytwentyone") | (.update | type == "string") and .active == false and .parent == null' out/status.json
   jq -e '.themes[] | select(.stylesheet == "psr-child") | .parent == "twentytwentyone" and .active == false and .name == "PSR Child"' out/status.json
+  jq -e '.themes[] | select(.stylesheet == "123") | .parent == null and .name == "Numeric"' out/status.json
   jq -e '.mustUse[] | select(.file == "psr-test-mu.php") | . == {"file": "psr-test-mu.php", "name": "PSR Test MU", "version": "1.2.3"}' out/status.json
   jq -e '.comments.defaultStatus == "closed"' out/status.json
   jq -e '.wordfence.active == true and (.wordfence | keys | sort) == ["active","ignored","issues","lastScanAt","version"]' out/status.json
@@ -244,7 +275,7 @@ Version: 1.2.3
   jq -e '.wordfence.active == false and .wordfence.issues == [] and .wordfence.ignored == 0 and .wordfence.lastScanAt == null' out/status.json
   # Left for later cases: Wordfence (inactive, seeded), akismet 5.0 (inactive), twentytwentyone 1.0, filled update transients.
   rm_mu psr-test-mu.php
-  wpcli theme delete psr-child
+  wpcli theme delete psr-child 123
   wpcli plugin auto-updates disable akismet
   wpcli option update default_comment_status open
 }
@@ -279,7 +310,7 @@ case_seo_with_rank_math() {
     update_post_meta( $id, "psr_seed", 1 );
   }'
   # the same process reports the pages it read, so the memory figure is of a real report
-  o=$(wpcli eval '$b = memory_get_usage(); $r = puzzles_sr_seo(); echo $r["types"]["page"]["items"], " ", memory_get_peak_usage() - $b;' | tr -d '\r\n')
+  o=$(wpcli eval 'require_once ABSPATH . "wp-admin/includes/plugin.php"; $b = memory_get_usage(); $r = puzzles_sr_seo(); echo $r["types"]["page"]["items"], " ", memory_get_peak_usage() - $b;' | tr -d '\r\n')
   echo "seo: ${o% *} pages, peak memory over baseline ${o#* } bytes"
   [ "${o% *}" = 306 ]
   [ "${o#* }" -lt 33554432 ] # under 32 MB; loading the seeded meta alone would be ~60 MB
@@ -402,18 +433,9 @@ case_update_offer() { # manifests signed by this run's throwaway key, served by 
   wpcli eval 'unlink( ABSPATH . "test-manifest.json" );'
 }
 
-# Fixed order (Task rulings). A new case is added to BOTH the function list and this one;
-# the check below fails on any mismatch, so a case can never be silently skipped.
-CASES=(case_plugin_active case_auth case_auth_locked_rest case_deactivation_revokes case_status_fresh case_status_wordfence_and_updates case_seo_without_rank_math case_seo_with_rank_math case_update_offer)
-
-for c in "${CASES[@]}"; do
-  declare -F "$c" >/dev/null || { echo "FAIL: listed case $c is not defined" >&2; exit 1; }
-done
-while read -r _ _ f; do
-  case "$f" in case_*)
-    [[ " ${CASES[*]} " == *" $f "* ]] || { echo "FAIL: defined case $f is not in CASES" >&2; exit 1; } ;;
-  esac
-done < <(declare -F)
+# Every case_* function above runs, in the order it is defined (later cases build on earlier ones).
+mapfile -t CASES < <(sed -n 's/^\(case_[a-z_]*\)() {.*/\1/p' smoke.sh)
+[ ${#CASES[@]} -gt 0 ] || { echo "FAIL: no case found" >&2; exit 1; }
 
 for case_fn in "${CASES[@]}"; do # not $c: the cases set globals (case_seo_with_rank_math has its own $c)
   echo "== $case_fn"

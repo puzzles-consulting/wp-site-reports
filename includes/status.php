@@ -13,16 +13,17 @@ function puzzles_sr_iso( $ts ): ?string {
 	return is_numeric( $ts ) && $ts > 0 ? gmdate( 'Y-m-d\TH:i:s\Z', (int) $ts ) : null;
 }
 
-/** The oldest last_checked of the three update transients; null if any never ran. */
-function puzzles_sr_updates_checked_at( array $transients ): ?string {
-	$oldest = null;
-	foreach ( $transients as $t ) {
-		if ( ! is_object( $t ) || empty( $t->last_checked ) ) {
-			return null;
-		}
-		$oldest = null === $oldest ? (int) $t->last_checked : min( $oldest, (int) $t->last_checked );
+/**
+ * The oldest last_checked of the three update checks, or null until each has succeeded once: a failed check still
+ * stamps last_checked but stores no data (core: no `updates`; plugins and themes: no `checked`). After a later failure
+ * the time is that of the failed check and the data is older.
+ */
+function puzzles_sr_updates_checked_at( $core, $plugins, $themes ): ?string {
+	if ( empty( $core->updates ) || empty( $plugins->checked ) || empty( $themes->checked )
+		|| empty( $core->last_checked ) || empty( $plugins->last_checked ) || empty( $themes->last_checked ) ) {
+		return null;
 	}
-	return puzzles_sr_iso( $oldest );
+	return puzzles_sr_iso( min( (int) $core->last_checked, (int) $plugins->last_checked, (int) $themes->last_checked ) );
 }
 
 /**
@@ -86,7 +87,7 @@ function puzzles_sr_wordfence( array $plugins ): ?array {
 				'type'        => (string) $i['type'],
 				'severity'    => (int) $i['severity'], // Wordfence's own: 100 critical, 75 high, 50 medium, 25 low
 				'shortMsg'    => puzzles_sr_short_msg( $i['shortMsg'] ),
-				'firstSeenAt' => puzzles_sr_iso( $i['time'] ?? null ),
+				'detectedAt'  => puzzles_sr_iso( $i['time'] ?? null ), // the last full scan that stored the issue
 			);
 		}
 		$out['ignored'] = (int) ( $counts['ignoreP'] ?? 0 ) + (int) ( $counts['ignoreC'] ?? 0 );
@@ -97,9 +98,7 @@ function puzzles_sr_wordfence( array $plugins ): ?array {
 }
 
 function puzzles_sr_status(): array {
-	require_once ABSPATH . 'wp-admin/includes/plugin.php'; // REST requests do not load it
-
-	$core_t       = get_site_transient( 'update_core' );
+	$core_t      = get_site_transient( 'update_core' );
 	$plugins_t    = get_site_transient( 'update_plugins' );
 	$themes_t     = get_site_transient( 'update_themes' );
 	$plugin_offer = $plugins_t->response ?? array();
@@ -141,7 +140,8 @@ function puzzles_sr_status(): array {
 	$themes = array();
 	$active = get_stylesheet();
 	foreach ( wp_get_themes() as $stylesheet => $t ) {
-		$entry    = (array) ( $theme_offer[ $stylesheet ] ?? array() ); // core stores arrays, a third-party updater may store objects
+		$stylesheet = (string) $stylesheet; // a numeric folder name is an integer array key
+		$entry   = (array) ( $theme_offer[ $stylesheet ] ?? array() ); // core stores arrays, a third-party updater may store objects
 		$offer    = is_scalar( $entry['new_version'] ?? null ) ? (string) $entry['new_version'] : null;
 		$template = $t->get_template();
 		$themes[] = array(
@@ -159,7 +159,7 @@ function puzzles_sr_status(): array {
 		'wordpress'  => array(
 			'version'          => get_bloginfo( 'version' ),
 			'update'           => $core_update,
-			'updatesCheckedAt' => puzzles_sr_updates_checked_at( array( $core_t, $plugins_t, $themes_t ) ),
+			'updatesCheckedAt' => puzzles_sr_updates_checked_at( $core_t, $plugins_t, $themes_t ),
 		),
 		'php'        => array( 'version' => PHP_VERSION ),
 		'plugins'    => $list,

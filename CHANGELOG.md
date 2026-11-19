@@ -4,7 +4,7 @@ All notable changes to this plugin are documented here. Format: [Keep a Changelo
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-11-18
+The first release, 1.0.0, once it is promoted.
 
 ### Added
 
@@ -16,3 +16,4 @@ All notable changes to this plugin are documented here. Format: [Keep a Changelo
   the release key (never in GitHub) signed. The download is capped at 5 MB and 60 seconds.
 - Wordfence messages in `/status` carry no server path: absolute paths and every URL but an http(s) one are dropped
   (http(s) URLs stay).
+- Page caches never keep a report: the routes define `DONOTCACHEPAGE` and tell LiteSpeed Cache not to cache.
