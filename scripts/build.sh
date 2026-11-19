@@ -29,6 +29,9 @@ S="$OUT/stage/puzzles-site-reports"
 rm -rf "$OUT/stage" "$OUT/puzzles-site-reports.zip" && mkdir -p "$S"
 # allowlist: only these ship, whatever else sits in the tree
 (cd "$SRC" && cp puzzles-site-reports.php uninstall.php README.md CHANGELOG.md LICENSE "$S/" && cp -r includes "$S/")
+# The promoter refuses anything else (scripts/wp-sr-promote): every shipped file is plain ASCII, and only PHP holds "<?".
+BAD=$(cd "$S" && { LC_ALL=C grep -rlaE $'[^\t -~]' . || true; }); [ -z "$BAD" ] || die "not plain ASCII (TAB, LF, printable):" $BAD
+BAD=$(cd "$S" && { grep -rlF '<?' --exclude='*.php' . || true; }); [ -z "$BAD" ] || die "not PHP but holds '<?':" $BAD
 
 F="$S/puzzles-site-reports.php"
 # Anchored: only these two whole lines are rewritten, and each must be there exactly once (scripts/wp-sr-promote checks

@@ -1,10 +1,10 @@
 name: CI
 on:
   pull_request:
-    paths-ignore: ['docs/**', '.claude/**', 'README.md', 'CHANGELOG.md', 'AGENTS.md']
+    paths-ignore: ['docs/**', '.claude/**', 'AGENTS.md'] # README and CHANGELOG ship: build.sh checks them
   push:
     branches: [main]
-    paths-ignore: ['docs/**', '.claude/**', 'README.md', 'CHANGELOG.md', 'AGENTS.md']
+    paths-ignore: ['docs/**', '.claude/**', 'AGENTS.md'] # README and CHANGELOG ship: build.sh checks them
 
 permissions:
   contents: read
