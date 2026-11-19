@@ -1,6 +1,6 @@
 # Contract
 
-The routes (`puzzles-reports/v1`) are documented here as the tasks that add them land.
+Two routes under `puzzles-reports/v1`, `GET /status` and `GET /seo`, share the authentication below.
 
 ## Authentication
 
@@ -38,9 +38,9 @@ Reads what WordPress already knows. It never triggers an update check or a Wordf
 
 - `update` (core, plugins, themes) is the version WordPress' own update data offers, or `null` for none.
 - `updatesCheckedAt` is the oldest of the last checks of WordPress' three update transients (core, plugins, themes), in UTC (`...Z`). It is `null` when any of the three never ran; then every `update` means "unknown", never "up to date". The plugin never triggers an update check.
-- `active` is a boolean; a network-active plugin counts as active. `autoUpdate` is true when the plugin is in WordPress' auto-update list.
+- `active` is a boolean; a network-active plugin counts as active. `autoUpdate` is true when the plugin is in WordPress' auto-update list, and only that: this plugin always installs its own updates, even when its own entry reads `false`.
 - `mustUse` carries only `file`, `name` and `version`. A theme's `parent` is its parent's stylesheet, `null` when it has none; `active` is the stylesheet in use.
-- `wordfence` is `null` when Wordfence is not installed (also when reading it fails). When it is installed but inactive, `active` is `false`, `issues` is `[]`, `ignored` is `0` and `lastScanAt` is `null`: its classes are not loaded. Otherwise `issues` are Wordfence's open (status `new`) scan results through its own `wfIssues` class, at most 200, ordered as Wordfence orders them (severity, highest first). `severity` is the integer Wordfence stores (100 critical, 75 high, 50 medium, 25 low). `shortMsg` is cut to 300 characters. `firstSeenAt` is when Wordfence first stored the issue. Wordfence's per-issue `data` is never returned. `ignored` counts the ignored issues. `lastScanAt` is Wordfence's own last-scan time, `null` if it never scanned. The plugin never starts a scan.
+- `wordfence` is `null` when Wordfence is not installed (also when reading it fails). When it is installed but inactive, `active` is `false`, `issues` is `[]`, `ignored` is `0` and `lastScanAt` is `null`: its classes are not loaded. Otherwise `issues` are Wordfence's open (status `new`) scan results through its own `wfIssues` class, at most 200, ordered as Wordfence orders them (severity, highest first). `severity` is the integer Wordfence stores (100 critical, 75 high, 50 medium, 25 low). `shortMsg` is plain text (markup stripped, entities decoded, server paths removed), cut to 300 characters. `firstSeenAt` is when Wordfence first stored the issue. Wordfence's per-issue `data` is never returned. `ignored` counts the ignored issues. `lastScanAt` is Wordfence's own last-scan time, `null` if it never scanned. The plugin never starts a scan. When `wordfence` is `null` but `plugins[]` contains `wordfence/wordfence.php`, the plugin is installed but could not be read (a Wordfence change); the portal shows "Wordfence could not be read", not "not installed".
 - `comments.defaultStatus` is the site's `default_comment_status` (`open` or `closed`).
 - No server path, database name, table prefix or token appears in the response.
 
@@ -66,6 +66,6 @@ Reads Rank Math's own post meta. It derives nothing, never resolves Rank Math's 
 - `seoScore` is Rank Math's stored score as an integer, or `null`.
 - `metaTitle` and `metaDescription` are the post's own Rank Math values, or `null` when empty (the post uses Rank Math's template).
 - `noindex` is `true` or `false` when the post sets its own robots in Rank Math (`rank_math_robots` holds a non-empty list; `true` when it contains `noindex`). It is `null` when the post has none, i.e. it follows Rank Math's defaults for its type (not resolved here).
-- `title` is the post's own title (no "Protected:" or "Private:" prefix); `url` is its permalink. Order within a type is newest first, ties by id descending.
+- `title` is the post's own title (no "Protected:" or "Private:" prefix); `url` is its permalink, or `null` when WordPress cannot build one. Order within a type is newest first, ties by id descending.
 - `plugin.version` is `null` if Rank Math does not expose its version constant.
 - Only Rank Math's own meta keys are read (never the rest of a post's meta), so a page-builder site's large posts are not loaded.

@@ -14,15 +14,6 @@ const PSR_SEO_LIMIT = 500;
 const PSR_SEO_CHUNK = 100;
 const PSR_SEO_KEYS  = array( 'rank_math_focus_keyword', 'rank_math_seo_score', 'rank_math_title', 'rank_math_description', 'rank_math_robots' );
 
-/** Plain text for the portal: no markup, entities decoded, trimmed; null when nothing is left. */
-function psr_plain( $v ): ?string {
-	if ( ! is_scalar( $v ) ) {
-		return null;
-	}
-	$s = trim( html_entity_decode( wp_strip_all_tags( (string) $v ), ENT_QUOTES | ENT_HTML5, 'UTF-8' ) );
-	return '' === $s ? null : $s;
-}
-
 /** true / false when the post sets its own Rank Math robots, null when it follows Rank Math's defaults. */
 function psr_noindex( $raw ): ?bool {
 	$r = is_string( $raw ) ? maybe_unserialize( $raw ) : $raw; // an array; a serialized string is read too
@@ -88,11 +79,12 @@ function psr_seo(): array {
 			foreach ( $chunk as $id ) {
 				$m       = isset( $meta[ $id ] ) ? $meta[ $id ] : array();
 				$kw      = psr_plain( isset( $m['rank_math_focus_keyword'] ) ? $m['rank_math_focus_keyword'] : null );
+				$link    = get_permalink( $id );
 				$score   = isset( $m['rank_math_seo_score'] ) ? trim( (string) $m['rank_math_seo_score'] ) : '';
 				$items[] = array(
 					'id'              => $id,
 					'type'            => $type,
-					'url'             => get_permalink( $id ),
+					'url'             => is_string( $link ) && '' !== $link ? $link : null,
 					'title'           => (string) psr_plain( get_post_field( 'post_title', $id, 'raw' ) ),
 					'focusKeywords'   => null === $kw ? array() : array_values( array_filter( array_map( 'trim', explode( ',', $kw ) ), 'strlen' ) ),
 					'seoScore'        => is_numeric( $score ) ? (int) $score : null,
@@ -103,6 +95,7 @@ function psr_seo(): array {
 				// A page builder's content can be megabytes: drop the post from the object cache now.
 				// (Not clean_post_cache(): for pages it runs one extra query per post to find children.)
 				wp_cache_delete( $id, 'posts' );
+				wp_cache_delete( $id, 'post_meta' ); // a post_link filter may have called get_post_meta, which loads every row
 			}
 		}
 	}

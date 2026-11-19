@@ -25,6 +25,7 @@ wpcli db check >/dev/null
 wpcli core install --url=http://localhost:8080 --title=Smoke --admin_user=admin \
   --admin_password=admin --admin_email=admin@example.com --skip-email
 wpcli plugin install /dist/puzzles-site-reports.zip --activate --force
+wpcli core version | tr -d '\r\n' > out/wp-version.txt # the manifest's `tested`: the WordPress this run is on
 
 # Hermetic: the update check reads a manifest served by this stack (http://wp/..., a 404 until case_update_offer writes
 # one), never GitHub's. Present from here on, so no case can reach the real URL.
@@ -92,6 +93,10 @@ case_auth_locked_rest() { # another plugin refuses every unauthenticated REST re
   wpcli eval "wp_mkdir_p( WPMU_PLUGIN_DIR ); file_put_contents( WPMU_PLUGIN_DIR . '/psr-lock.php', base64_decode( '$b' ) );"
   [ "$(curl -s -o /dev/null -w '%{http_code}' 'http://localhost:8080/?rest_route=/wp/v2/users')" = 401 ]  # the lock is on
   [ "$(call status "$t")" = 200 ]
+  # core matches routes case-insensitively: so do the token bypass and the no-store header
+  ci='http://localhost:8080/?rest_route=/Puzzles-Reports/V1/status'
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Puzzles-Reports-Token: $t" "$ci")" = 200 ]
+  curl -s -D - -o /dev/null -H "X-Puzzles-Reports-Token: $t" "$ci" | grep -qi '^cache-control:.*no-store'
   [ "$(call status)" = 401 ]
   [ "$(curl -s -o /dev/null -w '%{http_code}' 'http://localhost:8080/?rest_route=/wp/v2/users')" = 401 ]  # nothing else loosened
   wpcli eval "unlink( WPMU_PLUGIN_DIR . '/psr-lock.php' );"
@@ -130,7 +135,7 @@ case_status_wordfence_and_updates() {
   wpcli eval '
     global $wpdb;
     $i = wfIssues::shared();
-    $i->addIssue( "wfPluginUpgrade", 75, "a", "a", "PSR-short-marker in " . WP_CONTENT_DIR . "/plugins/x.php", "PSR-long-marker", array( "secret" => "/var/www/html/private-data" ) );
+    $i->addIssue( "wfPluginUpgrade", 75, "a", "a", "PSR-short-marker &amp; <b>bold</b> in " . WP_CONTENT_DIR . "/plugins/x.php", "PSR-long-marker", array( "secret" => "/var/www/html/private-data" ) );
     $i->addIssue( "wfThemeUpgrade", 50, "b", "b", "ignored one", "long", array() );
     $id = (int) $wpdb->get_var( "SELECT id FROM " . $i->getIssuesTable() . " WHERE type = \"wfThemeUpgrade\"" );
     if ( ! $id ) { exit( 1 ); }
@@ -138,7 +143,7 @@ case_status_wordfence_and_updates() {
     wfScanner::shared()->recordLastScanTime();'
   t=$(token_of "$(connect)"); [ "$(call status "$t")" = 200 ]
   jq -e '.wordfence.ignored == 1 and (.wordfence.lastScanAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$"))' out/status.json
-  jq -e '.wordfence.issues | length == 1 and .[0].type == "wfPluginUpgrade" and .[0].severity == 75 and .[0].shortMsg == "PSR-short-marker in wp-content/plugins/x.php" and (.[0].firstSeenAt | type == "string") and (.[0] | keys | sort) == ["firstSeenAt","severity","shortMsg","type"]' out/status.json
+  jq -e '.wordfence.issues | length == 1 and .[0].type == "wfPluginUpgrade" and .[0].severity == 75 and .[0].shortMsg == "PSR-short-marker & bold in wp-content/plugins/x.php" and (.[0].firstSeenAt | type == "string") and (.[0] | keys | sort) == ["firstSeenAt","severity","shortMsg","type"]' out/status.json
   ! grep -q 'PSR-long-marker' out/status.json || return 1               # shortMsg, never longMsg
   ! grep -q 'private-data' out/status.json || return 1                  # Wordfence's per-issue data never leaves
   jq -e '.wordpress.updatesCheckedAt != null' out/status.json
@@ -206,6 +211,7 @@ case_seo_with_rank_math() {
   jq -e --argjson e "$e" '.items[] | select(.id == $e) | .metaTitle == "Best & Roofing | Acme" and .metaDescription == "Fast \"repairs\" & more" and .focusKeywords == ["a","b"]' out/seo.json
   jq -e --argjson p "$p" '.items[] | select(.id == $p) | .type == "post" and .title == "News"' out/seo.json
   jq -e '[.items[] | select(.title == "Draft")] | length == 0' out/seo.json
+  jq -e '[.items[] | .url == null or (.url | type == "string")] | all' out/seo.json
   jq -e '.types.page.truncated == false and .types.page.items == 306 and (.types | has("product") | not)' out/seo.json
   jq -e '([.items[] | select(.type == "page")] | length) == .types.page.items and (.items | length) == (.types.page.items + .types.post.items)' out/seo.json
   # State left for later cases: Rank Math active; pages About, Contact, Services, the "Tom & Jerry" page and Pricing, one post

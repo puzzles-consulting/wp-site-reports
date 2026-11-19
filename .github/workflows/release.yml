@@ -39,7 +39,7 @@ jobs:
           persist-credentials: false
       - run: bash scripts/build.sh "${TAG#v}"
       - run: bash tests/smoke.sh
-      - run: bash scripts/manifest.sh "${TAG#v}"
+      - run: bash scripts/manifest.sh "${TAG#v}" "$(cat tests/out/wp-version.txt)" # the WordPress the smoke just ran on
       - run: gh release create "$TAG" dist/puzzles-site-reports.zip dist/manifest.json --prerelease --generate-notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

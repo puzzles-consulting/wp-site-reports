@@ -52,8 +52,8 @@ function psr_wordfence( array $plugins ): ?array {
 				$out['issues'][] = array(
 					'type'        => (string) $i['type'],
 					'severity'    => (int) $i['severity'], // Wordfence's own: 100 critical, 75 high, 50 medium, 25 low
-					// No absolute server path leaves: the content dir becomes "wp-content", the install root disappears (before the cut).
-					'shortMsg'    => mb_substr( str_replace( array( WP_CONTENT_DIR, ABSPATH ), array( 'wp-content', '' ), (string) $i['shortMsg'] ), 0, 300 ),
+					// No absolute server path leaves: the content dir becomes "wp-content", the install root disappears (before the cut). Plain text first, like /seo.
+					'shortMsg'    => mb_substr( str_replace( array( WP_CONTENT_DIR, ABSPATH ), array( 'wp-content', '' ), (string) psr_plain( $i['shortMsg'] ) ), 0, 300 ),
 					'firstSeenAt' => psr_iso( isset( $i['time'] ) ? $i['time'] : null ),
 				);
 			}

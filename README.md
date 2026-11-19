@@ -1,8 +1,8 @@
 # Puzzles Site Reports
 
 A read-only WordPress plugin that exposes a site's status and SEO data to Puzzles' client reports
-through two `GET` routes under `/wp-json/puzzles-reports/v1/`. It writes nothing, runs nothing on
-front-end requests and stores only the hash of its access token.
+through two `GET` routes under `/wp-json/puzzles-reports/v1/`. It stores only the hash of its
+access token and installs its own updates; nothing else is written. It runs nothing on front-end requests.
 
 Requires WordPress 5.8+ and PHP 7.4+.
 
@@ -16,8 +16,10 @@ wp plugin install puzzles-site-reports.zip --activate
 
 ## Connect
 
-Connection (token generation and the connection string) is documented in
-[`docs/contract.md`](docs/contract.md) as the routes land.
+In wp-admin, open **Tools → Puzzles Site Reports → Create connection**, or run
+`wp puzzles-site-reports connect --porcelain`. Paste the string it prints into the portal's Report setup. It is shown
+once, and creating a new connection stops the previous one at once. The routes and the authentication are in
+[`docs/contract.md`](docs/contract.md).
 
 ## Updates
 
@@ -43,8 +45,9 @@ bash scripts/manifest.sh <version>   # dist/manifest.json
 bash tests/smoke.sh                  # Docker smoke test against a throwaway WordPress
 ```
 
-`manifest.sh` reads `requires` and `requires_php` from the plugin header. `tested` (the WordPress the smoke ran on)
-is the `TESTED` default at the top of `scripts/manifest.sh`: bump it there when the smoke's WordPress moves.
+`manifest.sh` reads `requires` and `requires_php` from the plugin header. `tested` is the WordPress version
+the smoke test ran on: `tests/smoke.sh` writes it to `tests/out/wp-version.txt` and the release workflow passes it as
+`bash scripts/manifest.sh <version> <tested>`. Locally, without that argument, `scripts/manifest.sh` uses its `6.9` default.
 
 1. After `main`'s CI is green, tag `vX.Y.Z` (exactly three numbers) on it and push the tag.
    `.github/workflows/release.yml` lints PHP 7.4 to 8.4, builds the zip, runs the smoke test on it and publishes

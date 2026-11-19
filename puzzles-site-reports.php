@@ -21,6 +21,22 @@ define( 'PUZZLES_SITE_REPORTS_VERSION', '1.0.0' );
 define( 'PUZZLES_SITE_REPORTS_OPTION', 'puzzles_site_reports_token' );
 define( 'PUZZLES_SITE_REPORTS_NAMESPACE', 'puzzles-reports/v1' );
 
+/** Plain text for the portal: no markup, entities decoded, trimmed; null when nothing is left. */
+function psr_plain( $v ): ?string {
+	if ( ! is_scalar( $v ) ) {
+		return null;
+	}
+	$s = trim( html_entity_decode( wp_strip_all_tags( (string) $v ), ENT_QUOTES | ENT_HTML5, 'UTF-8' ) );
+	return '' === $s ? null : $s;
+}
+
+/** Whether a REST route (as requested) is this plugin's namespace or below it. Core matches routes case-insensitively, so this does too. */
+function psr_is_our_route( string $route ): bool {
+	$route = '/' . trim( $route, '/' );
+	$ns    = '/' . PUZZLES_SITE_REPORTS_NAMESPACE;
+	return 0 === strcasecmp( $route, $ns ) || 0 === strncasecmp( $route, $ns . '/', strlen( $ns ) + 1 );
+}
+
 require_once __DIR__ . '/includes/status.php';
 require_once __DIR__ . '/includes/seo.php';
 
@@ -89,7 +105,7 @@ function psr_register_route( string $route, callable $callback ): void {
 add_filter(
 	'rest_post_dispatch',
 	function ( $result, $server, $request ) {
-		if ( $result instanceof WP_HTTP_Response && 0 === strpos( $request->get_route(), '/' . PUZZLES_SITE_REPORTS_NAMESPACE ) ) {
+		if ( $result instanceof WP_HTTP_Response && psr_is_our_route( $request->get_route() ) ) {
 			$result->header( 'Cache-Control', 'no-store' );
 		}
 		return $result;
@@ -112,7 +128,7 @@ add_filter(
 		}
 		if ( isset( $d['routes'] ) && is_array( $d['routes'] ) ) {
 			foreach ( array_keys( $d['routes'] ) as $r ) {
-				if ( 0 === strpos( $r, '/puzzles-reports' ) ) {
+				if ( psr_is_our_route( (string) $r ) ) {
 					unset( $d['routes'][ $r ] );
 				}
 			}
@@ -128,10 +144,8 @@ add_filter(
 	'rest_authentication_errors',
 	function ( $result ) {
 		$route = isset( $GLOBALS['wp']->query_vars['rest_route'] ) ? (string) $GLOBALS['wp']->query_vars['rest_route'] : '';
-		$route = '/' . trim( $route, '/' );
-		$ns    = '/' . PUZZLES_SITE_REPORTS_NAMESPACE;
 		$token = isset( $_SERVER['HTTP_X_PUZZLES_REPORTS_TOKEN'] ) ? $_SERVER['HTTP_X_PUZZLES_REPORTS_TOKEN'] : '';
-		if ( ( $route === $ns || 0 === strpos( $route, $ns . '/' ) ) && psr_token_valid( $token ) ) {
+		if ( psr_is_our_route( $route ) && psr_token_valid( $token ) ) {
 			return true;
 		}
 		return $result;
@@ -164,12 +178,12 @@ function psr_update_offer( $update, $plugin_data, $plugin_file ) {
 	if ( plugin_basename( __FILE__ ) !== $plugin_file || ! is_array( $plugin_data ) || ! isset( $plugin_data['Version'] ) ) {
 		return $update;
 	}
-	$res = wp_remote_get( psr_filtered_string( 'puzzles_site_reports_manifest_url', PUZZLES_SITE_REPORTS_MANIFEST_URL ), array( 'timeout' => 10 ) );
+	$res = wp_remote_get( psr_filtered_string( 'puzzles_site_reports_manifest_url', PUZZLES_SITE_REPORTS_MANIFEST_URL ), array( 'timeout' => wp_doing_cron() ? 10 : 3 ) );
 	if ( is_wp_error( $res ) || 200 !== (int) wp_remote_retrieve_response_code( $res ) ) {
 		return $update;
 	}
 	$m = json_decode( wp_remote_retrieve_body( $res ), true );
-	if ( ! is_array( $m ) || ! isset( $m['version'], $m['package'] ) || ! is_string( $m['version'] ) || ! is_string( $m['package'] ) || ! preg_match( '/^\d+\.\d+\.\d+$/', $m['version'] ) ) {
+	if ( ! is_array( $m ) || ! isset( $m['version'], $m['package'] ) || ! is_string( $m['version'] ) || ! is_string( $m['package'] ) || ! preg_match( '/^\d+\.\d+\.\d+\z/', $m['version'] ) ) {
 		return $update;
 	}
 	// The package is exactly the asset this release's tag publishes: no other path, no dot segments.
