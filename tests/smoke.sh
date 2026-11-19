@@ -37,13 +37,11 @@ curl -fs -o /dev/null http://localhost:8080/
 command -v jq >/dev/null || jq() { docker run -i --rm -v "$(pwd -W 2>/dev/null || pwd)/out:/w/out" -w /w ghcr.io/jqlang/jq:1.7.1 "$@"; }
 
 base64url_decode() { # stdin -> stdout; re-pads and maps -_ to +/
-  local s; s=$(tr -d '
-' | tr '_-' '/+')
+  local s; s=$(tr -d '\r\n' | tr '_-' '/+')
   while [ $(( ${#s} % 4 )) -ne 0 ]; do s="$s="; done
   printf '%s' "$s" | base64 -d
 }
-connect() { wpcli puzzles-site-reports connect --porcelain | tr -d '
-'; } # prints the connection string
+connect() { wpcli puzzles-site-reports connect --porcelain | tr -d '\r\n'; } # prints the connection string
 token_of() { local s="$1"; echo "${s#pzr1.}" | base64url_decode | jq -r .token; }
 call() { # call <route> [token] -> HTTP status; the body lands in out/<route>.json
   local h=(); [ -z "${2:-}" ] || h=(-H "X-Puzzles-Reports-Token: $2")
@@ -70,17 +68,32 @@ case_auth() { # `! x || return 1`: a bare `! x` never trips set -e
   [ "${#t2}" -eq 64 ]                                              # 64 hex
   site=$(echo "${s2#pzr1.}" | base64url_decode | jq -r .site); [ "$site" = "http://localhost:8080" ]
   ! wpcli option get puzzles_site_reports_token | grep -q "$t2" || return 1   # only the hash is stored
-  [ "$(wpcli option get puzzles_site_reports_token --format=json | jq -r .hash | tr -d '')" = "$(printf %s "$t2" | sha256sum | cut -c1-64)" ]
-  ! curl -s http://localhost:8080/wp-json/ | grep -q puzzles-reports || return 1  # not in the public index
+  [ "$(wpcli option get puzzles_site_reports_token --format=json | jq -r .hash | tr -d '\r')" = "$(printf %s "$t2" | sha256sum | cut -c1-64)" ]
+  # not in the public index (plain permalinks: /wp-json/ is the home page, so ask through rest_route)
+  idx=$(curl -s 'http://localhost:8080/?rest_route=/')
+  [ "$(echo "$idx" | jq -r '.namespaces | index("wp/v2") != null')" = true ]  # it is the real index
+  [ "$(echo "$idx" | jq -r '[.namespaces[], (.routes | keys[])] | map(select(contains("puzzles-reports"))) | length')" = 0 ]
   curl -s -D - -o /dev/null "http://localhost:8080/?rest_route=/puzzles-reports/v1/status&_=1" -H "X-Puzzles-Reports-Token: $t2" | grep -qi '^cache-control:.*no-store'
   curl -s -D - -o /dev/null "http://localhost:8080/?rest_route=/puzzles-reports/v1/status&_=2" | grep -qi '^cache-control:.*no-store' # the 401 too
   wpcli puzzles-site-reports status | grep -q 'connected: yes'
   ! wpcli puzzles-site-reports status | grep -q "$t2" || return 1
 }
 
+case_auth_locked_rest() { # another plugin refuses every unauthenticated REST request: our token must still work
+  s=$(connect); t=$(token_of "$s")
+  mu='<?php add_filter( "rest_authentication_errors", function ( $r ) { return new WP_Error( "rest_not_logged_in", "x", array( "status" => 401 ) ); } );'
+  b=$(printf '%s' "$mu" | base64 | tr -d '\n')
+  wpcli eval "wp_mkdir_p( WPMU_PLUGIN_DIR ); file_put_contents( WPMU_PLUGIN_DIR . '/psr-lock.php', base64_decode( '$b' ) );"
+  [ "$(curl -s -o /dev/null -w '%{http_code}' 'http://localhost:8080/?rest_route=/wp/v2/users')" = 401 ]  # the lock is on
+  [ "$(call status "$t")" = 200 ]
+  [ "$(call status)" = 401 ]
+  [ "$(curl -s -o /dev/null -w '%{http_code}' 'http://localhost:8080/?rest_route=/wp/v2/users')" = 401 ]  # nothing else loosened
+  wpcli eval "unlink( WPMU_PLUGIN_DIR . '/psr-lock.php' );"
+}
+
 # Fixed order (Task rulings). A new case is added to BOTH the function list and this one;
 # the check below fails on any mismatch, so a case can never be silently skipped.
-CASES=(case_plugin_active case_auth)
+CASES=(case_plugin_active case_auth case_auth_locked_rest)
 # add, in this order, as their tasks land: case_status_fresh case_status_wordfence_and_updates
 #   case_seo_without_rank_math case_seo_with_rank_math case_update_offer
 

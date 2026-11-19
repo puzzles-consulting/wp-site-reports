@@ -18,48 +18,54 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 define( 'PUZZLES_SITE_REPORTS_VERSION', '0.0.0-dev' );
+define( 'PUZZLES_SITE_REPORTS_OPTION', 'puzzles_site_reports_token' );
+define( 'PUZZLES_SITE_REPORTS_NAMESPACE', 'puzzles-reports/v1' );
 
-define( 'PSR_OPTION', 'puzzles_site_reports_token' );
-define( 'PSR_NAMESPACE', 'puzzles-reports/v1' );
-
-/** Rotates the token and returns the connection string. Only the SHA-256 hash is stored. */
+/** Rotates the token. Returns the connection string, or a WP_Error if it could not be stored. Only the SHA-256 hash is stored. */
 function psr_create_connection() {
 	$token = bin2hex( random_bytes( 32 ) );
-	update_option(
-		PSR_OPTION,
+	$saved = update_option(
+		PUZZLES_SITE_REPORTS_OPTION,
 		array(
 			'hash'      => hash( 'sha256', $token ),
 			'createdAt' => gmdate( 'c' ),
 		),
 		false
 	);
+	if ( ! $saved ) {
+		return new WP_Error( 'puzzles_reports_not_saved', 'The connection could not be saved.' );
+	}
 	$payload = wp_json_encode( array( 'site' => home_url(), 'token' => $token ), JSON_UNESCAPED_SLASHES );
 	return 'pzr1.' . rtrim( strtr( base64_encode( $payload ), '+/', '-_' ), '=' );
 }
 
-function psr_disconnect() {
-	delete_option( PSR_OPTION );
+function psr_disconnect(): void {
+	delete_option( PUZZLES_SITE_REPORTS_OPTION );
 }
 
 /** The stored { hash, createdAt }, or null when not connected. */
-function psr_connection() {
-	$o = get_option( PSR_OPTION );
+function psr_connection(): ?array {
+	$o = get_option( PUZZLES_SITE_REPORTS_OPTION );
 	return is_array( $o ) && isset( $o['hash'] ) && is_string( $o['hash'] ) ? $o : null;
 }
 
-function psr_authorized( $request ) {
-	$c     = psr_connection();
-	$token = $request->get_header( 'X-Puzzles-Reports-Token' );
+function psr_token_valid( $token ): bool {
+	$c = psr_connection();
+	return $c && is_string( $token ) && '' !== $token && hash_equals( $c['hash'], hash( 'sha256', $token ) );
+}
+
+/** @return true|WP_Error */
+function psr_authorized( WP_REST_Request $request ) {
 	// One fixed refusal for every cause (no token, wrong token, not connected).
-	if ( $c && is_string( $token ) && '' !== $token && hash_equals( $c['hash'], hash( 'sha256', $token ) ) ) {
+	if ( psr_token_valid( $request->get_header( 'X-Puzzles-Reports-Token' ) ) ) {
 		return true;
 	}
 	return new WP_Error( 'puzzles_reports_unauthorized', 'Not authorized.', array( 'status' => 401 ) );
 }
 
-function psr_register_route( $route, $callback ) {
+function psr_register_route( string $route, callable $callback ): void {
 	register_rest_route(
-		PSR_NAMESPACE,
+		PUZZLES_SITE_REPORTS_NAMESPACE,
 		$route,
 		array(
 			'methods'             => 'GET',
@@ -69,6 +75,7 @@ function psr_register_route( $route, $callback ) {
 				try {
 					return call_user_func( $callback, $request );
 				} catch ( Throwable $e ) {
+					error_log( 'Puzzles Site Reports: ' . get_class( $e ) . ' in ' . $request->get_route() ); // class and route only, never the message
 					return new WP_Error( 'puzzles_reports_failed', 'The report could not be built.', array( 'status' => 500 ) );
 				}
 			},
@@ -79,13 +86,54 @@ function psr_register_route( $route, $callback ) {
 add_filter(
 	'rest_post_dispatch',
 	function ( $result, $server, $request ) {
-		if ( 0 === strpos( $request->get_route(), '/' . PSR_NAMESPACE ) ) {
+		if ( $result instanceof WP_HTTP_Response && 0 === strpos( $request->get_route(), '/' . PUZZLES_SITE_REPORTS_NAMESPACE ) ) {
 			$result->header( 'Cache-Control', 'no-store' );
 		}
 		return $result;
 	},
 	10,
 	3
+);
+
+// Core's index lists every namespace even when its routes are hidden: drop ours. (A direct request to
+// /puzzles-reports/v1 is still answered by core, so the plugin's presence is not fully hidden.)
+add_filter(
+	'rest_index',
+	function ( $response ) {
+		if ( ! $response instanceof WP_HTTP_Response ) {
+			return $response;
+		}
+		$d = $response->get_data();
+		if ( isset( $d['namespaces'] ) && is_array( $d['namespaces'] ) ) {
+			$d['namespaces'] = array_values( array_diff( $d['namespaces'], array( PUZZLES_SITE_REPORTS_NAMESPACE ) ) );
+		}
+		if ( isset( $d['routes'] ) && is_array( $d['routes'] ) ) {
+			foreach ( array_keys( $d['routes'] ) as $r ) {
+				if ( 0 === strpos( $r, '/puzzles-reports' ) ) {
+					unset( $d['routes'][ $r ] );
+				}
+			}
+		}
+		$response->set_data( $d );
+		return $response;
+	}
+);
+
+// Another plugin or snippet may refuse every unauthenticated REST request (it runs before permission_callback).
+// Our routes answer to the token alone: pass only a request for our namespace that carries a valid token; never touch anything else.
+add_filter(
+	'rest_authentication_errors',
+	function ( $result ) {
+		$route = isset( $GLOBALS['wp']->query_vars['rest_route'] ) ? (string) $GLOBALS['wp']->query_vars['rest_route'] : '';
+		$route = '/' . trim( $route, '/' );
+		$ns    = '/' . PUZZLES_SITE_REPORTS_NAMESPACE;
+		$token = isset( $_SERVER['HTTP_X_PUZZLES_REPORTS_TOKEN'] ) ? $_SERVER['HTTP_X_PUZZLES_REPORTS_TOKEN'] : '';
+		if ( ( $route === $ns || 0 === strpos( $route, $ns . '/' ) ) && psr_token_valid( $token ) ) {
+			return true;
+		}
+		return $result;
+	},
+	999
 );
 
 add_action(
@@ -106,15 +154,28 @@ add_action(
 	}
 );
 
-function psr_admin_page() {
+function psr_admin_page(): void {
 	if ( ! current_user_can( 'manage_options' ) ) {
 		wp_die( 'Not allowed.' );
 	}
 	$string = '';
+	$notice = '';
 	if ( 'POST' === $_SERVER['REQUEST_METHOD'] && isset( $_POST['psr_action'] ) ) {
 		if ( 'connect' === $_POST['psr_action'] ) {
 			check_admin_referer( 'psr_connect' );
-			$string = psr_create_connection();
+			$cur  = psr_connection();
+			$now  = $cur && isset( $cur['createdAt'] ) ? (string) $cur['createdAt'] : '';
+			$seen = isset( $_POST['psr_seen'] ) ? sanitize_text_field( wp_unslash( $_POST['psr_seen'] ) ) : '';
+			if ( $seen !== $now ) { // a reload or a second click: the string already pasted into the portal stays valid
+				$notice = 'A connection was already created; create a new one?';
+			} else {
+				$r = psr_create_connection();
+				if ( is_wp_error( $r ) ) {
+					$notice = $r->get_error_message();
+				} else {
+					$string = $r;
+				}
+			}
 		} elseif ( 'disconnect' === $_POST['psr_action'] ) {
 			check_admin_referer( 'psr_disconnect' );
 			psr_disconnect();
@@ -124,16 +185,21 @@ function psr_admin_page() {
 	echo '<div class="wrap"><h1>Puzzles Site Reports</h1>';
 	echo '<p>Version ' . esc_html( PUZZLES_SITE_REPORTS_VERSION ) . '</p>';
 	echo '<p>' . ( $c ? 'Connected since ' . esc_html( isset( $c['createdAt'] ) ? $c['createdAt'] : '' ) : 'Not connected' ) . '</p>';
+	if ( $notice ) {
+		echo '<div class="notice notice-warning inline"><p>' . esc_html( $notice ) . '</p></div>';
+	}
 	if ( $string ) {
 		echo '<p><input type="text" id="psr-string" class="large-text code" readonly value="' . esc_attr( $string ) . '"> ';
 		echo '<button type="button" class="button" onclick="navigator.clipboard.writeText(document.getElementById(\'psr-string\').value)">Copy</button></p>';
 		echo '<p>This string is shown once. Paste it into the portal\'s Report setup.</p>';
 	}
-	echo '<form method="post">';
+	$seen = $c && isset( $c['createdAt'] ) ? (string) $c['createdAt'] : '';
+	$ask  = $c ? ' onsubmit="return confirm(' . esc_attr( wp_json_encode( 'This disconnects the current portal connection.' ) ) . ')"' : '';
+	echo '<form method="post"' . $ask . '>';
 	wp_nonce_field( 'psr_connect' );
-	echo '<input type="hidden" name="psr_action" value="connect"><button class="button button-primary">Create connection</button></form>';
+	echo '<input type="hidden" name="psr_action" value="connect"><input type="hidden" name="psr_seen" value="' . esc_attr( $seen ) . '"><button class="button button-primary">Create connection</button></form>';
 	if ( $c ) {
-		echo '<form method="post" style="margin-top:8px">';
+		echo '<form method="post" style="margin-top:8px" onsubmit="return confirm(' . esc_attr( wp_json_encode( 'Disconnect this site from the portal?' ) ) . ')">';
 		wp_nonce_field( 'psr_disconnect' );
 		echo '<input type="hidden" name="psr_action" value="disconnect"><button class="button">Disconnect</button></form>';
 	}
@@ -151,12 +217,13 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		 */
 		public function connect( $args, $assoc ) {
 			$s = psr_create_connection();
-			if ( ! empty( $assoc['porcelain'] ) ) {
-				WP_CLI::line( $s );
-				return;
+			if ( is_wp_error( $s ) ) {
+				WP_CLI::error( $s->get_error_message() );
 			}
 			WP_CLI::line( $s );
-			WP_CLI::warning( 'Shown once. Paste it into the portal\'s Report setup.' );
+			if ( empty( $assoc['porcelain'] ) ) {
+				WP_CLI::warning( 'Shown once. Paste it into the portal\'s Report setup.' );
+			}
 		}
 
 		/** Shows the version and whether a connection exists (never the token). */
