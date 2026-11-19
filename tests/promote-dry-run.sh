@@ -151,28 +151,24 @@ printf "<?php \$n = 'PUZZLES_SR_' . 'UPDATE_PUBKEY';\n" >includes/evil.php; odd 
 printf "<?php echo constant( 'X' );\n" >includes/evil.php; odd v9.9.16 'cannot follow'
 printf "<?php define(\n\t'X', 1 );\n" >includes/evil.php; odd v9.9.17 'cannot follow'
 printf "<?php const\nPUZZLES_SR_X = 1;\n" >includes/evil.php; odd v9.9.52 'cannot follow'
-printf "<?php const PUZZLES_SITE_REPORTS_MAX_PACKAGE = 1;\n" >includes/evil.php; odd v9.9.53 'define a constant more than once'
-sed -i "/^define( 'PUZZLES_SR_UPDATE_PUBKEY'/i require_once __DIR__ . '/includes/seo.php';" puzzles-site-reports.php
-odd v9.9.18 'includes a file before it defines'
-sed -i "/^define( 'PUZZLES_SR_UPDATE_PUBKEY'/i if ( true ) require __DIR__ . '/includes/seo.php';" puzzles-site-reports.php
-odd v9.9.41 'includes a file before it defines' # anywhere on a line
-# A shipped file that is not PHP holds no PHP open tag: included, it would run.
-printf "<?php define( 'X', 1 );\n" >>CHANGELOG.md
-sed -i "/^define( 'PUZZLES_SR_UPDATE_PUBKEY'/i if ( true ) require __DIR__ . '/CHANGELOG.md';" puzzles-site-reports.php
-odd v9.9.19 "'CHANGELOG.md' is not PHP but holds a PHP open tag"
-# A shipped non-code file is not byte-checked: its control bytes reach the screen only through cat -v. The diff is
-# against the record: an unchanged line far from the change is not printed.
-printf 'An escape: \033[2K here\n' >>README.md; release v9.9.58 "$PUB1"
-promote v9.9.58 "$T/v9.9.58.zip" --trusted-zip "$T/v9.9.7.zip" >"$T/out" 2>&1 || { cat "$T/out"; exit 1; }
-grep -qxF '+An escape: ^[[2K here' "$T/out"
-! grep -q $'\033' "$T/out" || { echo "FAIL: a raw ESC in the output" >&2; exit 1; }
-! grep -qE '^[ +]# Puzzles Site Reports$' "$T/out" || { echo "FAIL: the diff printed an unchanged line" >&2; exit 1; }
-back_to v9.9.8; records v9.9.7
-echo "ok: README's ESC shows as ^[; the diff holds only the change"
-
-# 3b. Entry names no checkout could write (git mktree). Git Bash takes `\` as a separator: on Windows these would land
-# outside the staging directory, in $T/tmp. Outside the allowlist they are ignored (the release signs); inside it,
-# refused, as are names Windows would not write as they are.
+printf "<?php const PUZZLES_SITE_REPORTS_MAX_PACKAGE = 1;\n" >includes/evil.php; odd v9.9.53 'a constant more than once'
+# Nothing before the key define can run: only the header comment, blank lines, // comments, the ABSPATH guard and
+# literal defines; the key define itself is one top-level line.
+PRE='before its key define'
+KEYDEF="/^define( 'PUZZLES_SR_UPDATE_PUBKEY'/"
+sed -i "${KEYDEF}i require_once __DIR__ . '/includes/seo.php';" puzzles-site-reports.php; odd v9.9.18 "$PRE"
+sed -i "${KEYDEF}i if ( true ) require __DIR__ . '/includes/seo.php';" puzzles-site-reports.php; odd v9.9.41 "$PRE"
+sed -i "${KEYDEF}i \$pzr = array( 'k'=>include __DIR__ . '/includes/seo.php' );" puzzles-site-reports.php; odd v9.9.44 "$PRE"
+sed -i "s|^define( 'PUZZLES_SITE_REPORTS_OPTION'|define/**/( 'PUZZLES_SITE_REPORTS_OPTION'|" puzzles-site-reports.php; odd v9.9.45 "$PRE"
+sed -i "s|^ \* Author: .*| * Author: x */ \$pzr = 1; /*|" puzzles-site-reports.php; odd v9.9.46 "$PRE" # a comment closed mid-line
+sed -i "${KEYDEF}{s/^/function puzzles_sr_k() { /;s/\$/ }/}" puzzles-site-reports.php; odd v9.9.47 'needs its key on one top-level line'
+# Every shipped file is plain ASCII (a binary, such as a phar archive, cannot hide from the diff) and no file but PHP
+# holds a PHP open tag; a shipped name cannot be a directory.
+printf "<?php define( 'X', 1 );\n" >>CHANGELOG.md; odd v9.9.19 "'CHANGELOG.md' is not PHP but holds a PHP open tag"
+mkdir "$T/phar"; printf '<?php echo 1;\n' >"$T/phar/x.php"; (cd "$T/phar" && tar czf "$T/phar.tgz" x.php)
+cp "$T/phar.tgz" CHANGELOG.md; odd v9.9.42 "'CHANGELOG.md' $BYTE"
+printf 'An escape: \033[2K here\n' >>README.md; odd v9.9.48 "'README.md' $BYTE"
+printf "<?php include 'phar://' . __DIR__ . '/x.phar/a.php';\n" >includes/evil.php; odd v9.9.49 'names a phar'
 graft() { # graft <tag> <dir> <name> [tree]: tags, on main, v9.9.8's tree plus a blob (with "tree": a subtree holding x)
   local e t # at <dir>/<name>, <dir> "." for the root
   e="100644 blob $(printf 'escaped\n' | git hash-object -w --stdin)"
@@ -183,6 +179,21 @@ graft() { # graft <tag> <dir> <name> [tree]: tags, on main, v9.9.8's tree plus a
   t=$(g commit-tree -p "$(git rev-parse 'v9.9.8^{commit}')" -m "test: $1" "$t")
   git push -q origin "$t:refs/heads/main"; tag "$1" "$t"
 }
+graft v9.9.43 . README.md tree; refuses "'README.md/x' is not a shipped file" v9.9.43 "$T/v9.9.8.zip" --trusted-zip "$T/v9.9.7.zip"
+back_to v9.9.8
+# A legitimate release whose docs name the key, a const and the version define still signs. The diff is against the
+# record: an unchanged line far from the change is not printed.
+printf 'Docs may say `PUZZLES_SR_UPDATE_PUBKEY`, a const, or define( %s, %s );\n' "'PUZZLES_SITE_REPORTS_VERSION'" "'1.0.0'" >>README.md
+release v9.9.58 "$PUB1"
+promote v9.9.58 "$T/v9.9.58.zip" --trusted-zip "$T/v9.9.7.zip" >"$T/out" 2>&1 || { cat "$T/out"; exit 1; }
+grep -qF '+Docs may say `PUZZLES_SR_UPDATE_PUBKEY`' "$T/out"
+! grep -qE '^[ +]# Puzzles Site Reports$' "$T/out" || { echo "FAIL: the diff printed an unchanged line" >&2; exit 1; }
+back_to v9.9.8; records v9.9.7
+echo "ok: docs may name the key, a const and the version define; the diff holds only the change"
+
+# 3b. Entry names no checkout could write (git mktree). Git Bash takes `\` as a separator: on Windows these would land
+# outside the staging directory, in $T/tmp. Outside the allowlist they are ignored (the release signs); inside it,
+# refused, as are names Windows would not write as they are (graft is defined in section 3).
 n=20
 for name in '..\..\escaped' '-x' '.hidden' '..'; do # the first would land in $T/tmp
   graft "v9.9.$n" . "$name" "$([ "$name" = .. ] && echo tree || true)"; zip_of "v9.9.$n"
@@ -248,6 +259,11 @@ refuses 'is not newer than the latest release (9.9.8)' v9.9.8 "$T/v9.9.8.zip" --
 records v9.9.7 v9.9.13
 refuses 'is not newer than the latest release (9.9.13)' v9.9.8 "$T/v9.9.8.zip" --trusted-zip "$T/v9.9.13.zip"
 refuses 'is not the release your record expects' v9.9.60 "$T/v9.9.60.zip" --trusted-zip "$T/v9.9.7.zip" # v9.9.13 pulled
+# A record is the commit that was signed: one read by hand from a tag that has moved since (v9.9.7 plus a line) is not.
+g checkout -q -b moved v9.9.7; echo '// moved' >>includes/status.php; g commit -q -am moved
+git push -q origin HEAD:refs/heads/moved; git -C "$T/owner" fetch -q origin moved; MOVED=$(git rev-parse HEAD); g checkout -q main
+records; git -C "$T/owner" update-ref refs/puzzles-sr/dry-run/promoted/v9.9.7 "$MOVED"
+refuses 'does not build the zip that was signed for v9.9.7' v9.9.8 "$T/v9.9.8.zip" --trusted-zip "$T/v9.9.7.zip"
 records v9.9.7
 
 # 6. A dry run refuses any key in the clone's HEAD history: here the owner's checkout is one whose history carries PUB1.
@@ -378,9 +394,10 @@ else
   NSK=$SK2; o=$(live 9.9.62 v9.9.62 6.8.1 --rotate) || { echo "$o"; exit 1; }; NSK=""
   grep -qF "sites trust only $PUB2" <<<"$o"; SK=$SK2
   clone real2; CLONE=real2 # a second clone: the rotation release's record alone is not enough...
-  git -C "$T/real" for-each-ref --format='update %(refname) %(objectname)' refs/puzzles-sr/promoted/v9.9.62 | git -C "$T/real2" update-ref --stdin
+  copy_records() { git -C "$T/real" for-each-ref --format='update %(refname) %(objectname)' "$1" | git -C "$T/real2" update-ref --stdin; } # README's command
+  copy_records refs/puzzles-sr/promoted/v9.9.62
   o=$(live 9.9.63 v9.9.63 6.8.1) && { echo "$o"; exit 1; }; grep -qF 'the record of the release before the rotation' <<<"$o"
-  git -C "$T/real" for-each-ref --format='update %(refname) %(objectname)' refs/puzzles-sr/promoted | git -C "$T/real2" update-ref --stdin
+  copy_records refs/puzzles-sr/promoted
   o=$(live 9.9.63 v9.9.63 6.8.1) || { echo "$o"; exit 1; } # ...every record, as README says, is
   grep -qF 'baseline: v9.9.62, your last promotion' <<<"$o"; grep -qF 'promoted v9.9.63' <<<"$o"
   CLONE=real; SK=$SK1

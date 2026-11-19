@@ -8,7 +8,7 @@ Requires WordPress 5.8+ and PHP 7.4+.
 
 ## Install
 
-Upload `puzzles-site-reports.zip` in **Plugins → Add New → Upload Plugin**, or with WP-CLI:
+Upload `puzzles-site-reports.zip` in **Plugins > Add New > Upload Plugin**, or with WP-CLI:
 
 ```bash
 wp plugin install puzzles-site-reports.zip --activate
@@ -16,7 +16,7 @@ wp plugin install puzzles-site-reports.zip --activate
 
 ## Connect
 
-In wp-admin, open **Tools → Site Reports → Create connection** (on a multisite, a network admin only), or run
+In wp-admin, open **Tools > Site Reports > Create connection** (on a multisite, a network admin only), or run
 `wp puzzles-site-reports connect --porcelain`. Paste the string it prints into the portal's Report setup. It is shown
 once, and creating a new connection stops the previous one at once. The routes and the authentication are in
 [`docs/contract.md`](https://github.com/puzzles-consulting/wp-site-reports/blob/main/docs/contract.md).
