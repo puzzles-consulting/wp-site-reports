@@ -26,16 +26,62 @@ wpcli core install --url=http://localhost:8080 --title=Smoke --admin_user=admin 
   --admin_password=admin --admin_email=admin@example.com --skip-email
 wpcli plugin install /dist/puzzles-site-reports.zip --activate --force
 
+# Apache may lag behind `core install` (which went through WP-CLI): wait until WordPress answers over HTTP.
+for _ in $(seq 1 40); do
+  curl -fs -o /dev/null http://localhost:8080/ && break
+  sleep 3
+done
+curl -fs -o /dev/null http://localhost:8080/
+
+# Git Bash on Windows ships no jq: run it from an image (stdin, or files under out/).
+command -v jq >/dev/null || jq() { docker run -i --rm -v "$(pwd -W 2>/dev/null || pwd)/out:/w/out" -w /w ghcr.io/jqlang/jq:1.7.1 "$@"; }
+
+base64url_decode() { # stdin -> stdout; re-pads and maps -_ to +/
+  local s; s=$(tr -d '
+' | tr '_-' '/+')
+  while [ $(( ${#s} % 4 )) -ne 0 ]; do s="$s="; done
+  printf '%s' "$s" | base64 -d
+}
+connect() { wpcli puzzles-site-reports connect --porcelain | tr -d '
+'; } # prints the connection string
+token_of() { local s="$1"; echo "${s#pzr1.}" | base64url_decode | jq -r .token; }
+call() { # call <route> [token] -> HTTP status; the body lands in out/<route>.json
+  local h=(); [ -z "${2:-}" ] || h=(-H "X-Puzzles-Reports-Token: $2")
+  curl -s -o "out/$1.json" -w '%{http_code}' "${h[@]}" "http://localhost:8080/?rest_route=/puzzles-reports/v1/$1&_=$(date +%s%N)"
+}
+
 # ---- cases (plain functions; run in this fixed order, only the ones defined) ----
 case_plugin_active() {
   [ "$(wpcli plugin get puzzles-site-reports --field=status)" = "active" ]
   [ "$(wpcli plugin get puzzles-site-reports --field=version)" = "$EXPECTED_VERSION" ]
 }
 
+case_auth() { # `! x || return 1`: a bare `! x` never trips set -e
+  wpcli option delete puzzles_site_reports_token >/dev/null 2>&1 || true
+  [ "$(call status)" = 401 ]                                      # no token, not connected
+  [ "$(jq -r .code out/status.json)" = puzzles_reports_unauthorized ]
+  s1=$(connect); t1=$(token_of "$s1")
+  [ "$(call status "$t1")" = 200 ]
+  [ "$(call status wrong)" = 401 ]
+  s2=$(connect); t2=$(token_of "$s2")
+  [ "$(call status "$t1")" = 401 ]                                 # rotated: the old one is dead at once
+  [ "$(call status "$t2")" = 200 ]
+  [ "${s2:0:5}" = "pzr1." ]
+  [ "${#t2}" -eq 64 ]                                              # 64 hex
+  site=$(echo "${s2#pzr1.}" | base64url_decode | jq -r .site); [ "$site" = "http://localhost:8080" ]
+  ! wpcli option get puzzles_site_reports_token | grep -q "$t2" || return 1   # only the hash is stored
+  [ "$(wpcli option get puzzles_site_reports_token --format=json | jq -r .hash | tr -d '')" = "$(printf %s "$t2" | sha256sum | cut -c1-64)" ]
+  ! curl -s http://localhost:8080/wp-json/ | grep -q puzzles-reports || return 1  # not in the public index
+  curl -s -D - -o /dev/null "http://localhost:8080/?rest_route=/puzzles-reports/v1/status&_=1" -H "X-Puzzles-Reports-Token: $t2" | grep -qi '^cache-control:.*no-store'
+  curl -s -D - -o /dev/null "http://localhost:8080/?rest_route=/puzzles-reports/v1/status&_=2" | grep -qi '^cache-control:.*no-store' # the 401 too
+  wpcli puzzles-site-reports status | grep -q 'connected: yes'
+  ! wpcli puzzles-site-reports status | grep -q "$t2" || return 1
+}
+
 # Fixed order (Task rulings). A new case is added to BOTH the function list and this one;
 # the check below fails on any mismatch, so a case can never be silently skipped.
-CASES=(case_plugin_active)
-# add, in this order, as their tasks land: case_auth case_status_fresh case_status_wordfence_and_updates
+CASES=(case_plugin_active case_auth)
+# add, in this order, as their tasks land: case_status_fresh case_status_wordfence_and_updates
 #   case_seo_without_rank_math case_seo_with_rank_math case_update_offer
 
 for c in "${CASES[@]}"; do
