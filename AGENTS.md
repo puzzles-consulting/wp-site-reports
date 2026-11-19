@@ -8,16 +8,16 @@ reports. Public repo (GPL-2.0-or-later). Code, docs and commits are English.
 
 ```bash
 bash scripts/build.sh <version> && bash tests/smoke.sh   # one at a time: both are heavy
-bash tests/promote-dry-run.sh                             # tests the committed HEAD: commit first
+bash tests/promote-dry-run.sh                             # this worktree's promoter on the committed HEAD's trees
 ```
 
 `build.sh` writes a byte-reproducible `dist/puzzles-site-reports.zip`; `smoke.sh` boots WordPress in Docker, installs
 that zip and runs every `case_*` function (the update cases on a test build, `build.sh --test-overrides`). It tears
 the stack down on exit (`docker compose down -v`), also on failure: never leave containers running. On Windows Git
-Bash `smoke.sh` exports `MSYS_NO_PATHCONV=1`. `promote-dry-run.sh` runs the promotion (`scripts/launcher.sh` running
-the recorded `scripts/promote.sh`) against a throwaway origin, keys and a stand-in for `gh`; its real-path section
-needs `script(1)` for a terminal, so it is skipped in Git Bash and runs in CI. CI (`.github/workflows/ci.yml`) runs
-`php -l` on 7.4 to 8.4 plus both tests.
+Bash `smoke.sh` exports `MSYS_NO_PATHCONV=1`. `promote-dry-run.sh` runs the promoter, `scripts/wp-sr-promote`, against
+a throwaway origin, keys and a stand-in for `gh`, and checks that its zip is byte for byte `build.sh`'s; its real-path
+section needs `script(1)` for a terminal, so it is skipped in Git Bash and runs in CI. CI (`.github/workflows/ci.yml`)
+runs `php -l` on 7.4 to 8.4 plus both tests.
 
 ## Hard rules
 
@@ -38,10 +38,9 @@ needs `script(1)` for a terminal, so it is skipped in Git Bash and runs in CI. C
   as any route change, plus `CHANGELOG.md` under `[Unreleased]`.
 - Zip top folder is `puzzles-site-reports/`; `build.sh` rewrites the main file's one ` * Version: X.Y.Z` line and its
   one `define( 'PUZZLES_SITE_REPORTS_VERSION', 'X.Y.Z' );` line to its argument (keep both exactly in that form).
-- Signed updates, promotion and key rotation: README, Updates and Release; the checks themselves are in the headers of
-  `scripts/build.sh`, `scripts/launcher.sh` and `scripts/promote.sh` (the signing key never goes into GitHub).
-  Promotion runs `scripts/` as of the owner's last recorded promotion, never the checkout's: a change to `scripts/`
-  takes effect one promotion later, and a change to `build.sh`'s output needs `--trust-checkout` for the release that
-  carries it. `scripts/launcher.sh` is installed by hand: keep it small and stable.
+- Signed updates, promotion and key rotation: README, Updates and Release; the checks are in the header of
+  `scripts/wp-sr-promote` (the signing key never goes into GitHub). It is self-contained and installed by hand: it must
+  never source, run or eval anything from the repository or from git objects. It carries its own copy of `build.sh`'s
+  version rewrite and zip writer: a change to the zip's bytes goes into both, in one commit (the test compares them).
 - Commits are authored as `Puzzles Internal <internal@puzzles.consulting>`; the why goes in the body.
 - Pushing waits for the owner's OK.

@@ -44,10 +44,12 @@ host that blocks wordpress.org never sees this plugin's update either; the porta
 
 ## Release
 
+What a developer and CI run (never in the promotion account, below):
+
 ```bash
 bash scripts/build.sh <version>   # dist/puzzles-site-reports.zip, byte-reproducible
 bash tests/smoke.sh               # Docker smoke test against a throwaway WordPress
-bash tests/promote-dry-run.sh     # the promotion against a throwaway origin, keys and a stand-in for gh
+bash tests/promote-dry-run.sh     # the promoter against a throwaway origin, keys and a stand-in for gh
 ```
 
 1. After `main`'s CI is green, tag `vX.Y.Z` (exactly three numbers) on it and push the tag.
@@ -55,57 +57,62 @@ bash tests/promote-dry-run.sh     # the promotion against a throwaway origin, ke
    zip alone as a **pre-release**. It has no manifest, so no site is offered it.
 2. Install it on the canary site with WP-CLI and check it there (a functional check, not a review):
    `wp plugin install https://github.com/puzzles-consulting/wp-site-reports/releases/download/vX.Y.Z/puzzles-site-reports.zip --force`
-3. Review the checkout yourself: a clean checkout of `main` that contains the tag. Then sign and promote it, which rolls
-   it out to every site on its next update check, with the launcher (below) and the release key from the secret store
-   in that one command's environment:
-   `bash ~/bin/wp-sr-promote --repo <checkout> vX.Y.Z <tested>`. Type `<tested>` yourself (the release notes say
-   `Tested with WordPress 6.8.1`); never paste a command from release notes. Before the key is used it prints, against
-   your last promotion recorded on this machine, (1) `scripts/` and `.gitattributes`: the promotion code your NEXT
-   promotion will run, and (2) every file the release ships, in full; then you type the version, on the terminal.
-   Review both: that review is the control. The checks, the options and how the key is handled are in the header of
-   [`scripts/promote.sh`](scripts/promote.sh).
+3. Promote it, which rolls it out to every site on its next update check, with the promoter (below) and the release key
+   from the secret store in that one command's environment:
+   `bash ~/bin/wp-sr-promote --repo <your promotion clone> vX.Y.Z <tested>` (paths are taken as typed, relative to
+   where you are). Type `<tested>` yourself (the release notes say `Tested with WordPress 6.8.1`); never paste a
+   command from release notes. Before the key is used it prints the tag's commit and every file the release ships, in
+   full, against your last promotion recorded in that clone; then you type the version, on the terminal. That review
+   is the control. The checks and the options are in the promoter's header.
 
-The launcher. The code that holds the key and prints your review never comes from the checkout it reviews.
-[`scripts/launcher.sh`](scripts/launcher.sh) is the one script you review by hand and install outside the repository,
-from a commit you reviewed (its full sha):
+The promoter. No code from this repository ever runs in the promotion account: not `scripts/build.sh`, not the tests,
+nothing under `scripts/` or `tests/`. [`scripts/wp-sr-promote`](scripts/wp-sr-promote) is the whole promoter and key
+generator. You review it by hand and install it outside the repository, from a commit you reviewed (its full sha):
 
 ```bash
-git -C <checkout> show <sha>:scripts/launcher.sh | cat -v       # review it
-mkdir -p ~/bin && git -C <checkout> show <sha>:scripts/launcher.sh >~/bin/wp-sr-promote
+git -C <clone> show <sha>:scripts/wp-sr-promote | cat -v      # review it, all of it
+mkdir -p ~/bin && git -C <clone> show <sha>:scripts/wp-sr-promote >~/bin/wp-sr-promote
 ```
 
-It runs `scripts/promote.sh`, `build.sh` and `php.sh` as they were in your last promotion recorded on this machine (a
-local ref per promotion, `refs/puzzles-sr/promoted/vX.Y.Z`, written only by promote.sh: never push it or fetch into
-it). So a release's change to them runs only on the promotion after the one whose review (1) showed it. When (1) shows
-a change to `scripts/launcher.sh`, reinstall it after reviewing that change:
-`git -C <checkout> show <sha>:scripts/launcher.sh | diff ~/bin/wp-sr-promote - | cat -v`.
+It reads the tag's files from git as data, builds the zip itself (the same bytes as `scripts/build.sh`, which CI
+checks), signs with PHP (`php` on PATH, else the Docker image pinned in it) and uploads the manifest with `gh`.
+Re-installing a reviewed copy is the only way promotion changes: when a change to `scripts/wp-sr-promote` lands, review
+`git -C <clone> show <sha>:scripts/wp-sr-promote | diff ~/bin/wp-sr-promote - | cat -v` and install it again. A change
+to `scripts/build.sh` that changes the zip's bytes needs the same change in the promoter: until it is re-installed, it
+refuses those releases (their zip is not what it builds).
 
-- First promotion on a machine (a new or second machine has no record): the launcher refuses until you pass
-  `--trust-checkout <sha>`, the full sha of a commit whose `scripts/promote.sh`, `build.sh` and `php.sh` you reviewed
-  by hand (`git -C <checkout> show <sha>:scripts/promote.sh | cat -v`, and the other two). The review shows everything
-  as new; the record on that machine starts there.
-- A release whose `build.sh` changes the zip: the recorded `build.sh` cannot rebuild it, so the run stops after your
-  review. Once review (1) showed you that `build.sh`, run again with `--trust-checkout <the tag's commit sha>`.
+The record. Each promotion writes a local ref in the clone it ran in, `refs/puzzles-sr/promoted/vX.Y.Z` (the commit it
+signed): the baseline of the next review, nothing more. Never push it or fetch into it. Keep one promotion clone and
+always promote from it (`git -C <clone> fetch origin` is all it needs: the promoter never reads its worktree; for a
+checkout to read, `git -C <clone> worktree add <dir> vX.Y.Z` shares its record). Dry runs go in throwaway clones: the
+promoter refuses a dry run in a clone with a real record, and a real run in a clone with dry-run records.
+
+- First promotion in a clone (no record): the review shows everything as new.
+- Another clone or machine that is behind: review there, then either start over as a first promotion, or copy the
+  record from the clone that has it: `git -C <new clone> update-ref refs/puzzles-sr/promoted/vX.Y.Z <the sha
+  that clone records>` (read it there with `git for-each-ref refs/puzzles-sr`).
 - Bad release: `gh release edit vX.Y.Z --prerelease` stops the spread, and GitHub's latest falls back to an earlier
   release you recorded, which the next promotion accepts. Sites already on it are fixed only by rolling forward to
-  `X.Y.Z+1`, promoted as usual.
+  `X.Y.Z+1`, promoted as usual. Never mark a key-rotation release pre-release: sites on it trust only the new key, so
+  fix forward with a release signed with the new key.
 - Interrupted promotion (stopped after the release went live, before it was recorded): the next run finds that GitHub's
-  latest is the promotion it left pending, checks its manifest with your key against its zip and asks you to type its
-  version to record it. Then run again.
+  latest is the promotion it left pending, with a manifest your key signed, and asks you to type its version to record
+  it. If that was the release you asked for, nothing is left to do; otherwise run again.
 
 Branch protection on `main` and restricting who can create `v*` tags on GitHub are still recommended: they are
 repository settings, the owner's decision.
 
-The release key is created with `bash scripts/keygen.sh`: the public key goes into `PUZZLES_SR_UPDATE_PUBKEY`, the
-secret key goes from file descriptor 3 straight into the secret store (the script's header shows how).
+The release key is created by the promoter: `bash ~/bin/wp-sr-promote keygen 3>&1 1>&2 | <store-secret-from-stdin>`.
+The public key (on the terminal) goes into `PUZZLES_SR_UPDATE_PUBKEY`; the secret key goes from file descriptor 3
+straight into the secret store, never through a file or an argument.
 
 Rotating the key: sites trust only the key in the version they run, so the new key ships in a release signed with the
 old one.
 
-1. `bash scripts/keygen.sh` a new pair into the secret store (keep the old one), put the new public key in
+1. `bash ~/bin/wp-sr-promote keygen` a new pair into the secret store (keep the old one), put the new public key in
    `PUZZLES_SR_UPDATE_PUBKEY`, and release it as `vX.Y.Z` as above.
 2. Promote it with the **old** key in `PUZZLES_SR_SIGNING_KEY`, the **new** secret key in `PUZZLES_SR_NEW_SIGNING_KEY`
-   (the proof that it is yours) and `--rotate`: `bash ~/bin/wp-sr-promote --repo <checkout> vX.Y.Z <tested> --rotate`.
+   (the proof that it is yours) and `--rotate`: `bash ~/bin/wp-sr-promote --repo <clone> vX.Y.Z <tested> --rotate`.
 3. Promote the next release, with the new key, only once the portal shows every site on `X.Y.Z` or later: a site still
    on an older version accepts only the old key and would never reach `X.Y.Z` once a newer release is latest. Then
    retire the old key.
