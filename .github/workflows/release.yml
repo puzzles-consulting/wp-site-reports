@@ -36,11 +36,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+      # The plain build, never with --test-overrides: scripts/promote.sh signs it only if its own build of the tag's raw
+      # tree has the same sha256 (the smoke builds its test zip apart, in tests/out/testzip).
       - run: bash scripts/build.sh "${TAG#v}"
       - run: bash tests/smoke.sh
       - name: Pre-release the zip only
         run: |
-          [ -s tests/out/wp-version.txt ] || { echo "tests/out/wp-version.txt is missing or empty" >&2; exit 1; }
           WP="$(cat tests/out/wp-version.txt)"
           [[ "$WP" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "bad WordPress version: $WP" >&2; exit 1; }
           # Data only, never a command: the owner types `tested` into scripts/promote.sh (README, Release).

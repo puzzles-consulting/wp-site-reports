@@ -56,10 +56,10 @@ function puzzles_sr_create_connection() {
 	return 'pzr1.' . rtrim( strtr( base64_encode( $payload ), '+/', '-_' ), '=' );
 }
 
-/** Deletes the token; a network deactivation deletes every site's. */
+/** Deletes the token; a network deactivation deletes every site's of this network. */
 function puzzles_sr_disconnect( $network_wide = false ): void {
-	if ( $network_wide && is_multisite() ) {
-		foreach ( get_sites( array( 'fields' => 'ids', 'number' => 0 ) ) as $id ) {
+	if ( $network_wide ) { // true only on a multisite
+		foreach ( get_sites( array( 'fields' => 'ids', 'number' => 0, 'network_id' => get_current_network_id() ) ) as $id ) {
 			switch_to_blog( $id );
 			delete_option( PUZZLES_SITE_REPORTS_OPTION );
 			restore_current_blog();
@@ -177,17 +177,14 @@ add_action(
 // answer in the update_plugins transient, so nothing is cached here. Any failure leaves WordPress' answer untouched.
 // A manifest counts only when its Ed25519 signature over all its fields verifies with the key below, and the package is
 // installed only when it hashes to the signed sha256. The signing key never lives in GitHub (README, Release): write
-// access to the repository alone cannot ship a zip to the sites.
+// access to the repository alone cannot ship a zip to the sites. No filter changes these constants: the smoke test
+// builds its own zip with other values (scripts/build.sh --test-overrides).
 define( 'PUZZLES_SITE_REPORTS_MANIFEST_URL', 'https://github.com/puzzles-consulting/wp-site-reports/releases/latest/download/manifest.json' );
 define( 'PUZZLES_SITE_REPORTS_PACKAGE_PREFIX', 'https://github.com/puzzles-consulting/wp-site-reports/releases/download/' );
 // Base64 Ed25519 public key of the release signing key (created 2026-11-19; the secret key is held outside GitHub).
 // A new key means a release that ships the new public key, signed with the old one (README, Release).
 define( 'PUZZLES_SR_UPDATE_PUBKEY', 'FRx/KzeXTPzD6VBigvVottDDryTawD19IRq0FQ8uMXc=' );
-
-/** The release asset of a version. The prefix filter is test-only (the smoke serves its own releases). */
-function puzzles_sr_package_url( string $version ): string {
-	return (string) apply_filters( 'puzzles_site_reports_package_prefix', PUZZLES_SITE_REPORTS_PACKAGE_PREFIX ) . 'v' . $version . '/puzzles-site-reports.zip';
-}
+define( 'PUZZLES_SITE_REPORTS_MAX_PACKAGE', 5 * 1024 * 1024 ); // bytes; the zip is well under 1 MB
 
 /**
  * The manifest when every signed field is well formed and the signature verifies, else null. The signed message is the
@@ -198,12 +195,13 @@ function puzzles_sr_verified_manifest( string $body ): ?array {
 	if ( ! is_array( $m ) || ! is_string( $m['signature'] ?? null ) ) {
 		return null;
 	}
+	$ver     = '/^\d+\.\d+(\.\d+)?\z/';
 	$formats = array(
 		'version'      => '/^\d+\.\d+\.\d+\z/',
 		'sha256'       => '/^[0-9a-f]{64}\z/',
-		'requires'     => '/^\d+\.\d+(\.\d+)?\z/',
-		'requires_php' => '/^\d+\.\d+(\.\d+)?\z/',
-		'tested'       => '/^\d+\.\d+(\.\d+)?\z/',
+		'requires'     => $ver,
+		'requires_php' => $ver,
+		'tested'       => $ver,
 	);
 	$signed = array();
 	foreach ( $formats as $field => $re ) {
@@ -212,9 +210,8 @@ function puzzles_sr_verified_manifest( string $body ): ?array {
 		}
 		$signed[] = $m[ $field ];
 	}
-	// The key filter is test-only (the smoke signs with a throwaway key). Wrong lengths are refused before sodium:
-	// sodium_compat (WordPress' fallback when ext-sodium is missing) throws on them.
-	$key = base64_decode( (string) apply_filters( 'puzzles_sr_update_pubkey', PUZZLES_SR_UPDATE_PUBKEY ), true );
+	// Wrong lengths are refused before sodium: sodium_compat (WordPress' fallback when ext-sodium is missing) throws on them.
+	$key = base64_decode( PUZZLES_SR_UPDATE_PUBKEY, true );
 	$sig = base64_decode( $m['signature'], true );
 	if ( ! is_string( $key ) || 32 !== strlen( $key ) || ! is_string( $sig ) || 64 !== strlen( $sig ) ) {
 		return null;
@@ -231,8 +228,7 @@ function puzzles_sr_update_offer( $update, $plugin_data, $plugin_file ) {
 	if ( plugin_basename( __FILE__ ) !== $plugin_file ) {
 		return $update;
 	}
-	// The URL filter is test-only (the smoke serves its own manifest).
-	$res = wp_remote_get( (string) apply_filters( 'puzzles_site_reports_manifest_url', PUZZLES_SITE_REPORTS_MANIFEST_URL ), array( 'timeout' => wp_doing_cron() ? 10 : 3 ) );
+	$res = wp_remote_get( PUZZLES_SITE_REPORTS_MANIFEST_URL, array( 'timeout' => wp_doing_cron() ? 10 : 3 ) );
 	if ( is_wp_error( $res ) || 200 !== (int) wp_remote_retrieve_response_code( $res ) ) {
 		return $update;
 	}
@@ -254,7 +250,11 @@ function puzzles_sr_update_offer( $update, $plugin_data, $plugin_file ) {
 }
 add_filter( 'update_plugins_github.com', 'puzzles_sr_update_offer', 10, 3 );
 
-/** Core's download step for this plugin's sentinel package: the release zip, returned only if it hashes to the signed sha256. Any other package is left to core. */
+/**
+ * Core's download step for this plugin's sentinel package: the release zip, returned only if it hashes to the signed
+ * sha256. At most PUZZLES_SITE_REPORTS_MAX_PACKAGE bytes are read (a bigger answer is cut there and fails the hash).
+ * Any other package is left to core.
+ */
 function puzzles_sr_pre_download( $reply, $package, $upgrader = null, $hook_extra = array() ) {
 	if ( is_wp_error( $reply ) || ! is_string( $package ) || 0 !== strpos( $package, 'puzzles-sr://' )
 		|| ( isset( $hook_extra['plugin'] ) && plugin_basename( __FILE__ ) !== $hook_extra['plugin'] ) ) {
@@ -264,9 +264,19 @@ function puzzles_sr_pre_download( $reply, $package, $upgrader = null, $hook_extr
 		return new WP_Error( 'puzzles_sr_bad_package', 'The update package does not match its signed manifest.' );
 	}
 	require_once ABSPATH . 'wp-admin/includes/file.php';
-	$file = download_url( puzzles_sr_package_url( $p[1] ) );
-	if ( is_wp_error( $file ) ) {
-		return $file;
+	$file = wp_tempnam( 'puzzles-site-reports.zip' );
+	$res  = wp_safe_remote_get(
+		PUZZLES_SITE_REPORTS_PACKAGE_PREFIX . 'v' . $p[1] . '/puzzles-site-reports.zip',
+		array(
+			'timeout'             => 300,
+			'stream'              => true,
+			'filename'            => $file,
+			'limit_response_size' => PUZZLES_SITE_REPORTS_MAX_PACKAGE,
+		)
+	);
+	if ( is_wp_error( $res ) || 200 !== (int) wp_remote_retrieve_response_code( $res ) ) {
+		wp_delete_file( $file );
+		return new WP_Error( 'puzzles_sr_download_failed', 'The update package could not be downloaded.' );
 	}
 	if ( ! hash_equals( $p[2], (string) hash_file( 'sha256', $file ) ) ) {
 		wp_delete_file( $file );

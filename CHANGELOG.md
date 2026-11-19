@@ -8,13 +8,9 @@ All notable changes to this plugin are documented here. Format: [Keep a Changelo
 
 ### Added
 
-- Read-only status and SEO reports of the site for Puzzles' client reports: `GET /status` (WordPress, PHP, plugins,
-  themes, must-use plugins, available updates, Wordfence findings, comment default) and `GET /seo` (Rank Math focus
-  keywords, scores, titles, descriptions and noindex per published page and post), under `puzzles-reports/v1`.
-- Token connection: Tools > Site Reports (a network admin only on a multisite) or `wp puzzles-site-reports connect`
-  creates a connection string; the site stores only the token's SHA-256 hash, and creating a new connection or
-  deactivating the plugin revokes the old one at once.
-- Signed self-update from this repository's GitHub Releases through WordPress' own update check, installed
-  automatically. A release is offered only once every field of its manifest is signed (Ed25519) by the release key,
-  which never lives in GitHub, and installed only if the downloaded zip matches the signed SHA-256; a pre-release
-  reaches no site.
+- `GET /status` under `puzzles-reports/v1`: WordPress, PHP, plugins, themes, must-use plugins, available updates,
+  Wordfence findings and the comment default.
+- `GET /seo`: Rank Math focus keywords, scores, titles, descriptions and noindex of each published page and post.
+- A token connection from Tools > Site Reports or `wp puzzles-site-reports connect`, stored only as its SHA-256 hash.
+- Signed self-update from this repository's GitHub Releases, installed only when the download matches the SHA-256 that
+  the release key (never in GitHub) signed.

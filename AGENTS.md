@@ -7,13 +7,15 @@ reports. Public repo (GPL-2.0-or-later). Code, docs and commits are English.
 ## Gate
 
 ```bash
-bash scripts/build.sh <version> && bash tests/smoke.sh
+bash scripts/build.sh <version> && bash tests/smoke.sh   # one at a time: both are heavy
+bash tests/promote-dry-run.sh                             # tests the committed HEAD: commit first
 ```
 
-`build.sh` writes `dist/puzzles-site-reports.zip`; `smoke.sh` boots WordPress in Docker, installs the
-zip and runs every `case_*` function. It tears the stack down on exit (`docker compose down -v`),
-also on failure: never leave containers running. On Windows Git Bash `smoke.sh` exports
-`MSYS_NO_PATHCONV=1`. CI (`.github/workflows/ci.yml`) runs `php -l` on 7.4 to 8.4 plus the smoke.
+`build.sh` writes a byte-reproducible `dist/puzzles-site-reports.zip`; `smoke.sh` boots WordPress in Docker, installs
+that zip and runs every `case_*` function (the update cases on a test build, `build.sh --test-overrides`). It tears
+the stack down on exit (`docker compose down -v`), also on failure: never leave containers running. On Windows Git
+Bash `smoke.sh` exports `MSYS_NO_PATHCONV=1`. `promote-dry-run.sh` runs `scripts/promote.sh --dry-run` against a
+throwaway origin and keys. CI (`.github/workflows/ci.yml`) runs `php -l` on 7.4 to 8.4 plus both tests.
 
 ## Hard rules
 
@@ -34,6 +36,8 @@ also on failure: never leave containers running. On Windows Git Bash `smoke.sh` 
   as any route change, plus `CHANGELOG.md` under `[Unreleased]`.
 - Zip top folder is `puzzles-site-reports/`; `build.sh` rewrites `Version:` and
   `PUZZLES_SITE_REPORTS_VERSION` to its argument.
-- Signed updates, promotion and key rotation: README, Updates and Release (the signing key never goes into GitHub).
+- Signed updates, promotion and key rotation: README, Updates and Release; the checks themselves are in the headers of
+  `scripts/build.sh` and `scripts/promote.sh` (the signing key never goes into GitHub). A change to `build.sh`'s output
+  makes `promote.sh` refuse every release tagged before it (their zips no longer match its build).
 - Commits are authored as `Puzzles Internal <internal@puzzles.consulting>`; the why goes in the body.
 - Pushing waits for the owner's OK.

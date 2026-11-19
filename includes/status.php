@@ -37,9 +37,18 @@ function puzzles_sr_scrub_paths( string $s ): string {
 			$s = (string) preg_replace( '~' . preg_quote( $root, '~' ) . '(?:[/\\\\]|(?=[\s"\'<>:;,)\]]|\z))~', '', $s );
 		}
 	}
-	// What is left: a Unix (/a/b) or Windows (C:\a, \\host\a) absolute path, starting the text or after a space, quote,
-	// bracket, "=", ",", ";" or ":" (open_basedir:/x, include_path=.:/x). A URL's "://" is kept.
-	return (string) preg_replace( '~(?:(?<![^\s"\'(\[=,;])|(?<=:)(?!//))(?:[A-Za-z]:)?[\\\\/][^\s"\'<>]+~', '', $s );
+	// What is left: a Unix (/a/b) or Windows (C:\a, \\host\a) absolute path wherever it does not continue a word, a
+	// relative path or a URL (open_basedir:/x, include_path=.:/x, =>/x). A URL's "scheme://" is kept.
+	return (string) preg_replace( '~(?<![A-Za-z0-9._\~%/\\\\-])(?!(?<=:)//)(?:[A-Za-z]:)?[\\\\/][^\s"\'<>]+~', '', $s );
+}
+
+/**
+ * A Wordfence shortMsg for the portal: plain text without server paths, cut to 300 characters. Tags become a space
+ * first, so a path right after one ("Found<code>/etc/passwd") still starts a word and is removed.
+ */
+function puzzles_sr_short_msg( $v ): string {
+	$s = puzzles_sr_plain( is_scalar( $v ) ? preg_replace( '/\s*<[^>]*>\s*/', ' ', (string) $v ) : null );
+	return mb_substr( trim( puzzles_sr_scrub_paths( (string) $s ) ), 0, 300 );
 }
 
 /** Wordfence's own open issues, ignored count and last scan; null when it is not installed, or active but unreadable. Never starts a scan. */
@@ -58,7 +67,8 @@ function puzzles_sr_wordfence( array $plugins ): ?array {
 	if ( ! $out['active'] ) {
 		return $out; // its classes are not loaded: nothing to read
 	}
-	// Active but unreadable (a Wordfence change) is null, never "no issues". The filter is test-only: it forces that path.
+	// Active but unreadable (a Wordfence change) is null, never "no issues". The filter is for tests: it can only force that
+	// path (null), never make anything else readable.
 	if ( ! class_exists( 'wfIssues' ) || ! class_exists( 'wfScanner' ) || ! apply_filters( 'puzzles_sr_wordfence_reader_ok', true ) ) {
 		return null;
 	}
@@ -76,8 +86,7 @@ function puzzles_sr_wordfence( array $plugins ): ?array {
 			$out['issues'][] = array(
 				'type'        => (string) $i['type'],
 				'severity'    => (int) $i['severity'], // Wordfence's own: 100 critical, 75 high, 50 medium, 25 low
-				// Plain text first (like /seo), then no server path, then the cut.
-				'shortMsg'    => mb_substr( puzzles_sr_scrub_paths( (string) puzzles_sr_plain( $i['shortMsg'] ) ), 0, 300 ),
+				'shortMsg'    => puzzles_sr_short_msg( $i['shortMsg'] ),
 				'firstSeenAt' => puzzles_sr_iso( $i['time'] ?? null ),
 			);
 		}

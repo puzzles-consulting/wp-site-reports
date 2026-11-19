@@ -33,19 +33,21 @@ put_mu() { # put_mu <file> <php>: writes a must-use plugin (base64 through wp ev
 }
 rm_mu() { wpcli eval "unlink( WPMU_PLUGIN_DIR . '/$1' );"; } # rm_mu <file>
 
-# A throwaway Ed25519 keypair signs this run's manifests; the test-only filter swaps its public key in for the plugin's.
+# A throwaway Ed25519 keypair signs this run's manifests. case_update_offer installs a test build of the same tree whose
+# update constants point at this stack and this key (scripts/build.sh --test-overrides); the release zip has no such hook.
 kp=$(wpcli eval '$k = sodium_crypto_sign_keypair(); echo base64_encode( $k ), " ", base64_encode( sodium_crypto_sign_publickey( $k ) );' | tr -d '\r\n')
 KP=${kp% *}; PK=${kp#* }
 [ "${#KP}" -eq 128 ] # base64 of the 96-byte keypair
 [ "${#PK}" -eq 44 ]
+printf '%s\n' "PUZZLES_SR_UPDATE_PUBKEY $PK" 'PUZZLES_SITE_REPORTS_MANIFEST_URL http://wp/test-manifest.json' \
+  'PUZZLES_SITE_REPORTS_PACKAGE_PREFIX http://wp/releases/download/' >out/overrides.txt
+bash ../scripts/build.sh "$EXPECTED_VERSION" --out out/testzip --test-overrides out/overrides.txt >/dev/null
 
-# Hermetic: the update check reads a manifest served by this stack (http://wp/..., a 404 until case_update_offer writes
-# one), never GitHub's. Present from here on, so no case can reach the real URL.
+# Hermetic: the release zip's update check never reaches GitHub (an error, as for an offline site), and the test build's
+# manifest is served by this stack (http://wp/..., a 404 until case_update_offer writes one).
 mu='<?php
-add_filter( "puzzles_site_reports_manifest_url", function () { return "http://wp/test-manifest.json"; } );
-add_filter( "puzzles_site_reports_package_prefix", function () { return "http://wp/releases/download/"; } );
-add_filter( "puzzles_sr_update_pubkey", function () { return "__PK__"; } );
-add_filter( "http_request_host_is_external", function ( $ok, $host ) { return "wp" === $host ? true : $ok; }, 10, 2 ); // download_url() refuses private hosts
+add_filter( "pre_http_request", function ( $r, $args, $url ) { return 0 === strpos( $url, "https://github.com/puzzles-consulting/" ) ? new WP_Error( "smoke_offline", "offline" ) : $r; }, 10, 3 );
+add_filter( "http_request_host_is_external", function ( $ok, $host ) { return "wp" === $host ? true : $ok; }, 10, 2 ); // wp_safe_remote_get() refuses private hosts
 
 /**
  * Writes the manifest the update check reads, signed with $kp (a base64 keypair; none when empty) over its five fields
@@ -61,8 +63,8 @@ function puzzles_sr_test_manifest( $version, $sha, $kp, array $extra = array(), 
 }
 
 /** The download hook called directly: "<sha256 of the file it returned> <temp files left>", or "<error code or false> <temp files left>". */
-function puzzles_sr_test_download( $package ) {
-	$r    = apply_filters( "upgrader_pre_download", false, $package, null, array() );
+function puzzles_sr_test_download( $package, $plugin = null ) {
+	$r    = apply_filters( "upgrader_pre_download", false, $package, null, null === $plugin ? array() : array( "plugin" => $plugin ) );
 	$left = count( glob( get_temp_dir() . "puzzles-site-reports*" ) );
 	if ( is_string( $r ) ) {
 		$h = hash_file( "sha256", $r );
@@ -71,7 +73,7 @@ function puzzles_sr_test_download( $package ) {
 	}
 	return ( is_wp_error( $r ) ? $r->get_error_code() : var_export( $r, true ) ) . " $left";
 }'
-put_mu psr-update.php "${mu//__PK__/$PK}"
+put_mu psr-update.php "$mu"
 
 # Apache may lag behind `core install` (which went through WP-CLI): wait until WordPress answers over HTTP.
 for _ in $(seq 1 40); do
@@ -113,6 +115,9 @@ case_auth() {
   [ "$(jq -r .code out/status.json)" = puzzles_reports_unauthorized ]
   s1=$(connect); t1=$(token_of "$s1")
   [ "$(call status "$t1")" = 200 ]
+  # the namespace's own index route answers our 401 without a token too
+  [ "$(curl -s -o out/ns.json -w '%{http_code}' 'http://localhost:8080/?rest_route=/puzzles-reports/v1')" = 401 ]
+  [ "$(jq -r .code out/ns.json)" = puzzles_reports_unauthorized ]
   [ "$(call status wrong)" = 401 ]
   [ "$(jq -r .code out/status.json)" = puzzles_reports_unauthorized ]
   s2=$(connect); t2=$(token_of "$s2")
@@ -211,9 +216,14 @@ Version: 1.2.3
   ! grep -q 'PSR-long-marker' out/status.json || return 1               # shortMsg, never longMsg
   ! grep -q 'private-data' out/status.json || return 1                  # Wordfence's per-issue data never leaves
   ! grep -qE '/var/www|passwd|inetpub' out/status.json || return 1      # no server path anywhere
-  # the scrub itself: paths after ":" or "=.:" go, a root only matches at a path boundary (ABSPATH is /var/www/html/), URLs stay
-  o=$(wpcli eval 'echo puzzles_sr_scrub_paths( "A open_basedir:/home/x/secret B include_path=.:/usr/share/php C /var/wwwdata/x D https://example.com/a E" );' | tr -d '\r\n')
-  [ "$o" = "A open_basedir: B include_path=.: C  D https://example.com/a E" ]
+  # shortMsg's path scrub itself: paths after ":", "=.:", "=>" or a tag go, a root only matches at a path boundary
+  # (ABSPATH is /var/www/html/), URLs and relative paths stay
+  short() { wpcli eval "echo puzzles_sr_short_msg( base64_decode( '$(printf '%s' "$1" | base64 | tr -d '\n')' ) );" | tr -d '\r\n'; }
+  o=$(short 'A open_basedir:/home/x/secret B include_path=.:/usr/share/php C /var/wwwdata/x D https://example.com/a E wp-content/x.php')
+  [ "$o" = "A open_basedir: B include_path=.: C  D https://example.com/a E wp-content/x.php" ]
+  o=$(short 'Found<code>/etc/passwd</code>'); [ "$o" = Found ]
+  o=$(short 'Found<code>/var/wwwdata/x</code>'); [ "$o" = Found ]
+  o=$(short '=>/opt/x/y'); [ "$o" = '=>' ]
   jq -e '.wordpress.updatesCheckedAt != null' out/status.json
   jq -e '.plugins[] | select(.file == "akismet/akismet.php") | .active == false and .version == "5.0" and (.update | type == "string") and .autoUpdate == true' out/status.json
   jq -e '.plugins[] | select(.file == "puzzles-site-reports/puzzles-site-reports.php") | .autoUpdate == false' out/status.json
@@ -291,12 +301,17 @@ case_seo_with_rank_math() {
 
 case_update_offer() { # manifests signed by this run's throwaway key, served by the wp container (reached as http://wp)
   ours=puzzles-site-reports/puzzles-site-reports.php
-  sha=$(sha256sum ../dist/puzzles-site-reports.zip | cut -c1-64)
+  # the release zip asks GitHub (offline here): no offer, core's answer untouched
+  [ "$(wpcli eval "echo wp_json_encode( puzzles_sr_update_offer( 'input', array( 'Version' => '1.0.0' ), '$ours', array() ) );" | tr -d '\r\n')" = '"input"' ]
+  # from here on, the test build: the same tree with its update constants pointed at this stack and this run's key
+  wpcli plugin install /out/testzip/puzzles-site-reports.zip --force --activate
+  wpcli eval 'echo PUZZLES_SITE_REPORTS_MANIFEST_URL;' | grep -qx 'http://wp/test-manifest.json'
+  sha=$(sha256sum out/testzip/puzzles-site-reports.zip | cut -c1-64)
   pkg="puzzles-sr://9.9.9/$sha"                    # the offer's package: a sentinel only our download hook can fetch
   bad=$(printf x | sha256sum | cut -c1-64)        # a sha256 the zip does not have
   kp2=$(wpcli eval 'echo base64_encode( sodium_crypto_sign_keypair() );' | tr -d '\r\n') # another key
-  # the release asset: this run's own zip, so the real update at the end reinstalls the same plugin
-  wpcli eval "wp_mkdir_p( ABSPATH . 'releases/download/v9.9.9' ); copy( '/dist/puzzles-site-reports.zip', ABSPATH . 'releases/download/v9.9.9/puzzles-site-reports.zip' );"
+  # the release asset: the test build itself, so the real update at the end reinstalls the same plugin
+  wpcli eval "wp_mkdir_p( ABSPATH . 'releases/download/v9.9.9' ); copy( '/out/testzip/puzzles-site-reports.zip', ABSPATH . 'releases/download/v9.9.9/puzzles-site-reports.zip' );"
   [ "$(curl -fs http://localhost:8080/releases/download/v9.9.9/puzzles-site-reports.zip | sha256sum | cut -c1-64)" = "$sha" ]
 
   manifest() { # manifest <version> <sha256> [keypair; '' = unsigned] [PHP array items set after signing] [... before signing]
@@ -307,7 +322,7 @@ case_update_offer() { # manifests signed by this run's throwaway key, served by 
   filter() { # filter <installed-version> <plugin-file>: our update filter called directly; "input" is what core handed in
     wpcli eval "echo wp_json_encode( puzzles_sr_update_offer( 'input', array( 'Version' => '$1' ), '$2', array() ) );" | tr -d '\r\n'
   }
-  download() { wpcli eval "echo puzzles_sr_test_download( '${1:-$pkg}' );" | tr -d '\r\n'; } # see the setup mu-plugin
+  download() { wpcli eval "echo puzzles_sr_test_download( '${1:-$pkg}'${2:+, '$2'} );" | tr -d '\r\n'; } # download [package] [hook_extra plugin]: see the setup mu-plugin
   not_offered() { # neither the update check nor the filter called directly (which api.wordpress.org cannot mask) offers anything
     check
     local o f; o=$(offered); f=$(filter 1.0.0 "$ours")
@@ -335,10 +350,17 @@ case_update_offer() { # manifests signed by this run's throwaway key, served by 
   wpcli eval 'echo (int) apply_filters("auto_update_plugin", false, (object) ["plugin" => "puzzles-site-reports/puzzles-site-reports.php"]);' | grep -qx 1
   wpcli eval 'echo (int) apply_filters("auto_update_plugin", false, (object) ["plugin" => "akismet/akismet.php"]);' | grep -qx 0
   # the download hook maps the sentinel to the release zip and accepts it (one temp file, handed to core); a malformed
-  # sentinel is refused; any other package is core's
+  # sentinel is refused; any other package, or our sentinel while core updates another plugin, is core's
   o=$(download); [ "$o" = "$sha 1" ]
+  o=$(download "$pkg" "$ours"); [ "$o" = "$sha 1" ]
   o=$(download 'puzzles-sr://9.9.9/nothex'); [ "$o" = "puzzles_sr_bad_package 0" ]
   o=$(download http://wp/releases/download/v9.9.9/puzzles-site-reports.zip); [ "$o" = "false 0" ]
+  o=$(download "$pkg" akismet/akismet.php); [ "$o" = "false 0" ]
+  # a download over the size limit is cut there, so it fails even its own sha256, and its temp file is deleted
+  big=$(wpcli eval '$d = ABSPATH . "releases/download/v9.9.8"; wp_mkdir_p( $d ); file_put_contents( "$d/puzzles-site-reports.zip", str_repeat( "x", PUZZLES_SITE_REPORTS_MAX_PACKAGE + 1 ) ); echo hash_file( "sha256", "$d/puzzles-site-reports.zip" );' | tr -d '\r\n')
+  o=$(download "puzzles-sr://9.9.8/$big"); [ "$o" = "puzzles_sr_bad_package 0" ]
+  wpcli eval 'unlink( ABSPATH . "releases/download/v9.9.8/puzzles-site-reports.zip" );'
+  o=$(download 'puzzles-sr://9.9.7/'"$sha"); [ "$o" = "puzzles_sr_download_failed 0" ] # no such release: a 404
 
   # nothing is offered unless the key signed exactly these five fields, all well formed
   manifest 9.9.9 "$sha" ''; not_offered                                                    # unsigned
@@ -350,15 +372,16 @@ case_update_offer() { # manifests signed by this run's throwaway key, served by 
   manifest 9.9.9 "$sha" "$KP" "'requires_php' => '5.6'"; not_offered                       # another one
   manifest 9.9.9 "$sha" "$KP" "'requires' => null"; not_offered                            # a signed field missing
   manifest 9.9.9 "$sha" "$KP" "" "'tested' => 'latest'"; not_offered                       # signed, but not a version
+  manifest 9.9.9 "$sha" "$KP" "" "'requires' => '5.x'"; not_offered                        # another one
+  manifest 9.9.9 "$sha" "$KP" "" "'requires_php' => '7'"; not_offered                      # and another
   manifest 9.9.9-beta "$sha"; not_offered                                                   # not X.Y.Z, though signed
   manifest 9.9.9 "$(tr a-f A-F <<<"$sha")"; not_offered                                     # not lowercase hex, though signed
   wpcli eval 'file_put_contents( ABSPATH . "test-manifest.json", "not json" );'; not_offered
 
   wpcli eval 'touch( WP_PLUGIN_DIR . "/puzzles-site-reports/psr-marker" );'
-  # a signed sha256 the zip does not have: offered, but the download is refused, its temp file deleted, and the update fails
+  # a signed sha256 the zip does not have: offered, but the download is refused and the update fails
   manifest 9.9.9 "$bad"
   check; o=$(offered); [ "$o" = 9.9.9 ]
-  o=$(download "puzzles-sr://9.9.9/$bad"); [ "$o" = "puzzles_sr_bad_package 0" ]
   update_fails
   grep -q 'does not match its signed manifest' out/update.log
 
