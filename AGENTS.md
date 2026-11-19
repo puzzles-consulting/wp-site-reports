@@ -16,8 +16,9 @@ that zip and runs every `case_*` function (the update cases on a test build, `bu
 the stack down on exit (`docker compose down -v`), also on failure: never leave containers running. On Windows Git
 Bash `smoke.sh` exports `MSYS_NO_PATHCONV=1`. `promote-dry-run.sh` runs the promoter, `scripts/wp-sr-promote`, against
 a throwaway origin, keys and a stand-in for `gh`, and checks that its zip is byte for byte `build.sh`'s; its real-path
-section needs `script(1)` for a terminal, so it is skipped in Git Bash and runs in CI. CI (`.github/workflows/ci.yml`)
-runs `php -l` on 7.4 to 8.4 plus both tests.
+section needs `script(1)` for a terminal, so it is skipped in Git Bash and runs in CI (with `$CI` set, a missing
+`script(1)` fails the test). CI (`.github/workflows/ci.yml`) runs `php -l` on 7.4 to 8.4 plus both tests. Shipped files
+other than PHP must never hold `<?` (the promoter refuses them).
 
 ## Hard rules
 

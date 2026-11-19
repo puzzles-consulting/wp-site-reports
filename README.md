@@ -55,49 +55,48 @@ bash tests/promote-dry-run.sh     # the promoter against a throwaway origin, key
 1. After `main`'s CI is green, tag `vX.Y.Z` (exactly three numbers) on it and push the tag.
    `.github/workflows/release.yml` lints PHP 7.4 to 8.4, builds the zip, runs the smoke test on it and publishes the
    zip alone as a **pre-release**. It has no manifest, so no site is offered it.
-2. Install it on the canary site with WP-CLI and check it there (a functional check, not a review):
+2. Check it on the canary: a remote, isolated WordPress site that holds no secrets, driven from its own host or with
+   `wp --ssh=<canary>`, never from the promotion machine or account (a test is a functional check, not a review):
    `wp plugin install https://github.com/puzzles-consulting/wp-site-reports/releases/download/vX.Y.Z/puzzles-site-reports.zip --force`
-3. Promote it, which rolls it out to every site on its next update check, with the promoter (below) and the release key
-   from the secret store in that one command's environment:
-   `bash ~/bin/wp-sr-promote --repo <your promotion clone> vX.Y.Z <tested>` (paths are taken as typed, relative to
-   where you are). Type `<tested>` yourself (the release notes say `Tested with WordPress 6.8.1`); never paste a
-   command from release notes. Before the key is used it prints the tag's commit and every file the release ships, in
-   full, against your last promotion recorded in that clone; then you type the version, on the terminal. That review
-   is the control. The checks and the options are in the promoter's header.
+3. Promote it, which rolls it out to every site on its next update check, with the release key from the secret store
+   in that one command's environment: `bash ~/bin/wp-sr-promote --repo <your promotion clone> vX.Y.Z <tested>`. Type
+   `<tested>` yourself (the release notes say `Tested with WordPress 6.8.1`); never paste a command from release notes.
+   Review what it prints before you type the version: that review is the control.
 
 The promoter. No code from this repository ever runs in the promotion account: not `scripts/build.sh`, not the tests,
 nothing under `scripts/` or `tests/`. [`scripts/wp-sr-promote`](scripts/wp-sr-promote) is the whole promoter and key
-generator. You review it by hand and install it outside the repository, from a commit you reviewed (its full sha):
+generator; its header says what it checks. It needs bash 4.4+, GNU sed and coreutils, git 2.40+, python3, unzip, gh,
+and php with sodium or Docker. Review it by hand and install it outside the repository, from a commit you reviewed:
 
 ```bash
 git -C <clone> show <sha>:scripts/wp-sr-promote | cat -v      # review it, all of it
 mkdir -p ~/bin && git -C <clone> show <sha>:scripts/wp-sr-promote >~/bin/wp-sr-promote
 ```
 
-It reads the tag's files from git as data, builds the zip itself (the same bytes as `scripts/build.sh`, which CI
-checks), signs with PHP (`php` on PATH, else the Docker image pinned in it) and uploads the manifest with `gh`.
 Re-installing a reviewed copy is the only way promotion changes: when a change to `scripts/wp-sr-promote` lands, review
 `git -C <clone> show <sha>:scripts/wp-sr-promote | diff ~/bin/wp-sr-promote - | cat -v` and install it again. A change
 to `scripts/build.sh` that changes the zip's bytes needs the same change in the promoter: until it is re-installed, it
-refuses those releases (their zip is not what it builds).
+refuses those releases.
 
-The record. Each promotion writes a local ref in the clone it ran in, `refs/puzzles-sr/promoted/vX.Y.Z` (the commit it
-signed): the baseline of the next review, nothing more. Never push it or fetch into it. Keep one promotion clone and
-always promote from it (`git -C <clone> fetch origin` is all it needs: the promoter never reads its worktree; for a
-checkout to read, `git -C <clone> worktree add <dir> vX.Y.Z` shares its record). Dry runs go in throwaway clones: the
-promoter refuses a dry run in a clone with a real record, and a real run in a clone with dry-run records.
+The record. Each promotion writes a local ref in the clone it ran in, `refs/puzzles-sr/promoted/vX.Y.Z`: the baseline
+of the next review. Never push it or fetch into it. Keep one promotion clone (`--repo` is its top folder) and always
+promote from it; `git -C <clone> fetch origin` is all it needs. Dry runs go in throwaway clones: the promoter refuses a
+dry run in a clone with a real record, and a real run in a clone with dry-run records.
 
-- First promotion in a clone (no record): the review shows everything as new.
-- Another clone or machine that is behind: review there, then either start over as a first promotion, or copy the
-  record from the clone that has it: `git -C <new clone> update-ref refs/puzzles-sr/promoted/vX.Y.Z <the sha
-  that clone records>` (read it there with `git for-each-ref refs/puzzles-sr`).
+- Another clone or machine: copy every record from the clone that has them, after reviewing them there
+  (`git -C <old clone> for-each-ref refs/puzzles-sr/promoted`):
+  `git -C <old clone> for-each-ref --format='update %(refname) %(objectname)' refs/puzzles-sr/promoted | git -C <new clone> update-ref --stdin`.
+  If the old clone is lost, start over as a first promotion; after a key rotation, record by hand the release before
+  the rotation as well as the rotation release (`git -C <new clone> update-ref refs/puzzles-sr/promoted/vX.Y.Z
+  'vX.Y.Z^{commit}'`, after reviewing that tag), since the rotation release is signed with the old key.
 - Bad release: `gh release edit vX.Y.Z --prerelease` stops the spread, and GitHub's latest falls back to an earlier
   release you recorded, which the next promotion accepts. Sites already on it are fixed only by rolling forward to
-  `X.Y.Z+1`, promoted as usual. Never mark a key-rotation release pre-release: sites on it trust only the new key, so
-  fix forward with a release signed with the new key.
+  `X.Y.Z+1`, promoted as usual. Two exceptions. Never mark a key-rotation release pre-release: sites on it trust only
+  the new key, so fix forward with a release signed with the new key. Never mark your first-ever promotion
+  pre-release: promote `X.Y.Z+1` at once (or delete its record and start over).
 - Interrupted promotion (stopped after the release went live, before it was recorded): the next run finds that GitHub's
-  latest is the promotion it left pending, with a manifest your key signed, and asks you to type its version to record
-  it. If that was the release you asked for, nothing is left to do; otherwise run again.
+  latest is the promotion it left pending, with the zip it signed, and asks you to type its version to record it. If
+  that was the release you asked for, nothing is left to do; otherwise run again.
 
 Branch protection on `main` and restricting who can create `v*` tags on GitHub are still recommended: they are
 repository settings, the owner's decision.

@@ -1,6 +1,6 @@
 name: Release
 # A `vX.Y.Z` tag: PHP lint on 7.4 to 8.4, build, smoke on that exact zip, then a PRE-release of the zip alone (no manifest:
-# no site sees it until the owner signs and promotes it with the launcher, README > Release).
+# no site sees it until the owner signs and promotes it with the promoter, README > Release).
 on:
   push:
     tags: ['v*']
