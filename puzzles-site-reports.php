@@ -3,7 +3,7 @@
  * Plugin Name:       Puzzles Site Reports
  * Plugin URI:        https://github.com/puzzles-consulting/wp-site-reports
  * Description:       Read-only status and SEO reports of this WordPress site for Puzzles' client reports.
- * Version:           0.0.0-dev
+ * Version:           1.0.0
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            Puzzles
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'PUZZLES_SITE_REPORTS_VERSION', '0.0.0-dev' );
+define( 'PUZZLES_SITE_REPORTS_VERSION', '1.0.0' );
 define( 'PUZZLES_SITE_REPORTS_OPTION', 'puzzles_site_reports_token' );
 define( 'PUZZLES_SITE_REPORTS_NAMESPACE', 'puzzles-reports/v1' );
 
@@ -145,6 +145,60 @@ add_action(
 		psr_register_route( '/status', 'psr_status' );
 		psr_register_route( '/seo', 'psr_seo' );
 	}
+);
+
+// ---- Self-update from GitHub Releases ----
+// Core runs this only inside its own update check (cron or admin), never on a front-end request, and caches the
+// answer in the update_plugins transient, so nothing is cached here. Any failure leaves WordPress' answer untouched.
+define( 'PUZZLES_SITE_REPORTS_MANIFEST_URL', 'https://github.com/puzzles-consulting/wp-site-reports/releases/latest/download/manifest.json' );
+define( 'PUZZLES_SITE_REPORTS_PACKAGE_PREFIX', 'https://github.com/puzzles-consulting/wp-site-reports/releases/download/' );
+
+/** A filtered string, or the default when a filter returns anything else. */
+function psr_filtered_string( string $hook, string $default ): string {
+	$v = apply_filters( $hook, $default );
+	return is_string( $v ) && '' !== $v ? $v : $default;
+}
+
+/** Core's `update_plugins_github.com` filter (the header's Update URI host). Only answers for this plugin. */
+function psr_update_offer( $update, $plugin_data, $plugin_file ) {
+	if ( plugin_basename( __FILE__ ) !== $plugin_file || ! is_array( $plugin_data ) || ! isset( $plugin_data['Version'] ) ) {
+		return $update;
+	}
+	$res = wp_remote_get( psr_filtered_string( 'puzzles_site_reports_manifest_url', PUZZLES_SITE_REPORTS_MANIFEST_URL ), array( 'timeout' => 10 ) );
+	if ( is_wp_error( $res ) || 200 !== (int) wp_remote_retrieve_response_code( $res ) ) {
+		return $update;
+	}
+	$m = json_decode( wp_remote_retrieve_body( $res ), true );
+	if ( ! is_array( $m ) || ! isset( $m['version'], $m['package'] ) || ! is_string( $m['version'] ) || ! is_string( $m['package'] ) || '' === $m['version'] ) {
+		return $update;
+	}
+	$prefix = psr_filtered_string( 'puzzles_site_reports_package_prefix', PUZZLES_SITE_REPORTS_PACKAGE_PREFIX );
+	if ( 0 !== strpos( $m['package'], $prefix ) || ! version_compare( $m['version'], (string) $plugin_data['Version'], '>' ) ) {
+		return $update;
+	}
+	$opt = function ( $k ) use ( $m ) {
+		return isset( $m[ $k ] ) && is_string( $m[ $k ] ) ? $m[ $k ] : '';
+	};
+	return array(
+		'slug'         => 'puzzles-site-reports',
+		'version'      => $m['version'],
+		'package'      => $m['package'],
+		'requires'     => $opt( 'requires' ),
+		'requires_php' => $opt( 'requires_php' ),
+		'tested'       => $opt( 'tested' ),
+		'url'          => 'https://github.com/puzzles-consulting/wp-site-reports',
+	);
+}
+add_filter( 'update_plugins_github.com', 'psr_update_offer', 10, 3 );
+
+// Sites install this plugin's updates themselves; every other plugin keeps whatever core decided.
+add_filter(
+	'auto_update_plugin',
+	function ( $update, $item ) {
+		return is_object( $item ) && isset( $item->plugin ) && plugin_basename( __FILE__ ) === $item->plugin ? true : $update;
+	},
+	10,
+	2
 );
 
 // ---- Admin page: Tools > Site Reports ----

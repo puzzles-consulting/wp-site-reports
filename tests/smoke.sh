@@ -207,10 +207,33 @@ case_seo_with_rank_math() {
   wpcli eval 'foreach ( get_posts( array( "post_type" => "page", "post_status" => "any", "meta_key" => "psr_seed", "numberposts" => -1, "fields" => "ids" ) ) as $id ) { wp_delete_post( $id, true ); }'
 }
 
+case_update_offer() { # a local manifest (served by the wp container, reached as http://wp) offers 9.9.9
+  mu='<?php add_filter( "puzzles_site_reports_manifest_url", function () { return "http://wp/test-manifest.json"; } ); add_filter( "puzzles_site_reports_package_prefix", function () { return "http://wp/"; } );'
+  b=$(printf '%s' "$mu" | base64 | tr -d '\n')
+  wpcli eval "wp_mkdir_p( WPMU_PLUGIN_DIR ); file_put_contents( WPMU_PLUGIN_DIR . '/psr-update.php', base64_decode( '$b' ) ); copy( '/dist/puzzles-site-reports.zip', ABSPATH . 'test.zip' );"
+  manifest() { # manifest <version> <package>: written into the wp container's web root
+    wpcli eval "file_put_contents( ABSPATH . 'test-manifest.json', json_encode( array( 'version' => '$1', 'package' => '$2', 'requires' => '5.8', 'requires_php' => '7.4', 'tested' => '6.9' ) ) );"
+  }
+  check() { wpcli transient delete update_plugins --network; wpcli eval 'wp_update_plugins();'; }
+  offered() { wpcli plugin list --name=puzzles-site-reports --field=update_version | tr -d '\r\n'; }
+
+  manifest 9.9.9 http://wp/test.zip
+  curl -fs http://localhost:8080/test-manifest.json | grep -q '9.9.9'
+  check
+  [ "$(offered)" = "9.9.9" ]
+  wpcli eval '$u = get_site_transient( "update_plugins" ); echo $u->response["puzzles-site-reports/puzzles-site-reports.php"]->package;' | grep -qx 'http://wp/test.zip'
+  wpcli eval 'echo (int) apply_filters("auto_update_plugin", false, (object) ["plugin" => "puzzles-site-reports/puzzles-site-reports.php"]);' | grep -qx 1
+  wpcli eval 'echo (int) apply_filters("auto_update_plugin", false, (object) ["plugin" => "akismet/akismet.php"]);' | grep -qx 0
+  # nothing is offered for a package outside the allowed prefix, a version that is not newer, or a body that is not a manifest
+  manifest 9.9.9 http://evil.example/test.zip; check; [ -z "$(offered)" ]
+  manifest 0.0.1 http://wp/test.zip; check; [ -z "$(offered)" ]
+  wpcli eval 'file_put_contents( ABSPATH . "test-manifest.json", "not json" );'; check; [ -z "$(offered)" ]
+  wpcli eval 'unlink( WPMU_PLUGIN_DIR . "/psr-update.php" ); unlink( ABSPATH . "test.zip" ); unlink( ABSPATH . "test-manifest.json" );'
+}
+
 # Fixed order (Task rulings). A new case is added to BOTH the function list and this one;
 # the check below fails on any mismatch, so a case can never be silently skipped.
-CASES=(case_plugin_active case_auth case_auth_locked_rest case_status_fresh case_status_wordfence_and_updates case_seo_without_rank_math case_seo_with_rank_math)
-# add, in this order, as its task lands: case_update_offer
+CASES=(case_plugin_active case_auth case_auth_locked_rest case_status_fresh case_status_wordfence_and_updates case_seo_without_rank_math case_seo_with_rank_math case_update_offer)
 
 for c in "${CASES[@]}"; do
   declare -F "$c" >/dev/null || { echo "FAIL: listed case $c is not defined" >&2; exit 1; }

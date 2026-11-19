@@ -1,0 +1,23 @@
+name: Release
+# A `v*` tag builds the zip, runs the smoke test on that exact zip and only then publishes a PRE-release.
+# Sites follow `releases/latest`, which GitHub never points at a pre-release: promoting it
+# (`gh release edit vX.Y.Z --prerelease=false --latest`) is what rolls it out.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/build.sh "${TAG#v}"
+      - run: bash tests/smoke.sh
+      - run: bash scripts/manifest.sh "${TAG#v}"
+      - run: gh release create "$TAG" dist/puzzles-site-reports.zip dist/manifest.json --prerelease --generate-notes
