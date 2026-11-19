@@ -4,7 +4,7 @@ on:
     paths-ignore: ['docs/**', '.claude/**', 'AGENTS.md'] # README and CHANGELOG ship: build.sh checks them
   push:
     branches: [main]
-    paths-ignore: ['docs/**', '.claude/**', 'AGENTS.md'] # README and CHANGELOG ship: build.sh checks them
+    paths-ignore: ['docs/**', '.claude/**', 'AGENTS.md']
 
 permissions:
   contents: read
