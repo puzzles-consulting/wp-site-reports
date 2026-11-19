@@ -172,12 +172,39 @@ case_seo_with_rank_math() {
   b=$(wpcli post create --post_type=page --post_status=publish --post_title=Contact --post_name=contact-us --porcelain | tr -d '\r\n')
   wpcli post meta update "$b" rank_math_focus_keyword '   '
   wpcli post create --post_type=page --post_status=draft --post_title=Draft
+  c=$(wpcli post create --post_type=page --post_status=publish --post_title=Services --porcelain | tr -d '\r\n')
+  wpcli post meta update "$c" rank_math_robots '["index","nofollow"]' --format=json
+  d=$(wpcli post create --post_type=page --post_status=publish --post_title="Tom & Jerry's <em>Show</em>" --porcelain | tr -d '\r\n')
+  e=$(wpcli post create --post_type=page --post_status=publish --post_title=Pricing --porcelain | tr -d '\r\n')
+  wpcli post meta update "$e" rank_math_title 'Best &amp; <b>Roofing</b> | Acme'
+  wpcli post meta update "$e" rank_math_description 'Fast &quot;repairs&quot; &amp; <i>more</i>'
+  wpcli post meta update "$e" rank_math_focus_keyword 'a,,b'
+  p=$(wpcli post create --post_type=post --post_status=publish --post_title=News --porcelain | tr -d '\r\n')
+
+  # A page-builder site: 300 pages that each carry ~200 KB of unrelated meta. Reading the report must not load it.
+  wpcli eval 'for ( $i = 0; $i < 300; $i++ ) {
+    $id = wp_insert_post( array( "post_type" => "page", "post_status" => "publish", "post_title" => "Seed $i", "post_content" => str_repeat( "x", 20000 ) ) );
+    update_post_meta( $id, "_elementor_data", str_repeat( "x", 200000 ) );
+    update_post_meta( $id, "psr_seed", 1 );
+  }'
+  mem=$(wpcli eval '$b = memory_get_usage(); psr_seo(); echo memory_get_peak_usage() - $b;' | tr -d '\r\n')
+  echo "seo peak memory over baseline: $mem bytes"
+  [ "$mem" -lt 33554432 ] # under 32 MB; loading the seeded meta alone would be ~60 MB
+
   t=$(token_of "$(connect)"); [ "$(call seo "$t")" = 200 ]
-  jq -e '.plugin.name == "rank_math" and (.plugin.version | type == "string")' out/seo.json
+  jq -e '.plugin.name == "rank_math" and (.plugin.version | type == "string" and length > 0)' out/seo.json
   jq -e --argjson a "$a" '.items[] | select(.id == $a) | .focusKeywords == ["roofing miami","roof repair"] and .seoScore == 81 and .noindex == true and .metaTitle == null and .type == "page" and .title == "About" and (.url | type == "string")' out/seo.json
   jq -e --argjson b "$b" '.items[] | select(.id == $b) | .focusKeywords == [] and .seoScore == null and .noindex == null' out/seo.json
+  jq -e --argjson c "$c" '.items[] | select(.id == $c) | .noindex == false' out/seo.json
+  jq -e --argjson d "$d" '.items[] | select(.id == $d) | .title == "Tom & Jerry'"'"'s Show"' out/seo.json
+  jq -e --argjson e "$e" '.items[] | select(.id == $e) | .metaTitle == "Best & Roofing | Acme" and .metaDescription == "Fast \"repairs\" & more" and .focusKeywords == ["a","b"]' out/seo.json
+  jq -e --argjson p "$p" '.items[] | select(.id == $p) | .type == "post" and .title == "News"' out/seo.json
   jq -e '[.items[] | select(.title == "Draft")] | length == 0' out/seo.json
-  jq -e '.types.page.truncated == false and (.types | has("product") | not)' out/seo.json
+  jq -e '.types.page.truncated == false and .types.page.items == 306 and (.types | has("product") | not)' out/seo.json
+  jq -e '([.items[] | select(.type == "page")] | length) == .types.page.items and (.items | length) == (.types.page.items + .types.post.items)' out/seo.json
+  # State left for later cases: Rank Math active; pages About, Contact, Services, the "Tom & Jerry" page and Pricing, one post
+  # (News) and one draft remain; the 300 seeded pages are deleted so the site stays light.
+  wpcli eval 'foreach ( get_posts( array( "post_type" => "page", "post_status" => "any", "meta_key" => "psr_seed", "numberposts" => -1, "fields" => "ids" ) ) as $id ) { wp_delete_post( $id, true ); }'
 }
 
 # Fixed order (Task rulings). A new case is added to BOTH the function list and this one;

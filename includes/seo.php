@@ -1,6 +1,9 @@
 <?php
 /**
  * GET /seo. Reads Rank Math's own post meta; nothing is derived or resolved, and it never branches on the current user.
+ *
+ * Memory: page-builder sites keep megabytes of meta (and long content) per post. Only Rank Math's five keys are read,
+ * in chunks, and each post leaves the object cache as soon as its item is built; a fatal out-of-memory cannot be caught.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -8,21 +11,45 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 const PSR_SEO_LIMIT = 500;
+const PSR_SEO_CHUNK = 100;
+const PSR_SEO_KEYS  = array( 'rank_math_focus_keyword', 'rank_math_seo_score', 'rank_math_title', 'rank_math_description', 'rank_math_robots' );
 
-/** A meta value as a trimmed string, or null when it is empty. */
-function psr_meta_text( int $id, string $key ): ?string {
-	$v = get_post_meta( $id, $key, true );
-	$v = is_scalar( $v ) ? trim( (string) $v ) : '';
-	return '' === $v ? null : $v;
+/** Plain text for the portal: no markup, entities decoded, trimmed; null when nothing is left. */
+function psr_plain( $v ): ?string {
+	if ( ! is_scalar( $v ) ) {
+		return null;
+	}
+	$s = trim( html_entity_decode( wp_strip_all_tags( (string) $v ), ENT_QUOTES | ENT_HTML5, 'UTF-8' ) );
+	return '' === $s ? null : $s;
 }
 
 /** true / false when the post sets its own Rank Math robots, null when it follows Rank Math's defaults. */
-function psr_noindex( int $id ): ?bool {
-	$r = maybe_unserialize( get_post_meta( $id, 'rank_math_robots', true ) ); // an array; a serialized string is read too
+function psr_noindex( $raw ): ?bool {
+	$r = is_string( $raw ) ? maybe_unserialize( $raw ) : $raw; // an array; a serialized string is read too
 	if ( is_string( $r ) && '' !== $r ) {
 		$r = array( $r );
 	}
 	return is_array( $r ) && $r ? in_array( 'noindex', $r, true ) : null;
+}
+
+/** Rank Math's own meta for some posts: [ post_id => [ meta_key => raw value ] ], first row of a key wins (as get_post_meta does). */
+function psr_seo_meta( array $ids ): array {
+	global $wpdb;
+	$out  = array();
+	$rows = $wpdb->get_results(
+		$wpdb->prepare(
+			'SELECT post_id, meta_key, meta_value FROM ' . $wpdb->postmeta
+			. ' WHERE post_id IN (' . implode( ',', array_fill( 0, count( $ids ), '%d' ) ) . ')'
+			. ' AND meta_key IN (' . implode( ',', array_fill( 0, count( PSR_SEO_KEYS ), '%s' ) ) . ') ORDER BY meta_id',
+			array_merge( $ids, PSR_SEO_KEYS )
+		)
+	);
+	foreach ( (array) $rows as $r ) {
+		if ( ! isset( $out[ (int) $r->post_id ][ $r->meta_key ] ) ) {
+			$out[ (int) $r->post_id ][ $r->meta_key ] = $r->meta_value;
+		}
+	}
+	return $out;
 }
 
 function psr_seo(): array {
@@ -46,40 +73,42 @@ function psr_seo(): array {
 				'post_type'        => $type,
 				'post_status'      => 'publish',
 				'numberposts'      => PSR_SEO_LIMIT + 1,
-				'orderby'          => 'date',
-				'order'            => 'DESC',
+				'orderby'          => array( 'date' => 'DESC', 'ID' => 'DESC' ),
 				'fields'           => 'ids',
 				'suppress_filters' => true,
 			)
 		);
-		$truncated = count( $ids ) > PSR_SEO_LIMIT;
-		$ids       = array_slice( $ids, 0, PSR_SEO_LIMIT );
-		if ( $ids ) {
-			update_meta_cache( 'post', $ids );
-			_prime_post_caches( $ids, false, false ); // one query for the posts, so title and url below cost none
-		}
+		$truncated        = count( $ids ) > PSR_SEO_LIMIT;
+		$ids              = array_slice( array_map( 'intval', $ids ), 0, PSR_SEO_LIMIT );
 		$summary[ $type ] = array( 'items' => count( $ids ), 'truncated' => $truncated );
 
-		foreach ( $ids as $id ) {
-			$id    = (int) $id;
-			$kw    = psr_meta_text( $id, 'rank_math_focus_keyword' );
-			$score = psr_meta_text( $id, 'rank_math_seo_score' );
-			$items[] = array(
-				'id'              => $id,
-				'type'            => $type,
-				'url'             => get_permalink( $id ),
-				'title'           => html_entity_decode( get_the_title( $id ), ENT_QUOTES, 'UTF-8' ),
-				'focusKeywords'   => null === $kw ? array() : array_values( array_filter( array_map( 'trim', explode( ',', $kw ) ), 'strlen' ) ),
-				'seoScore'        => null !== $score && is_numeric( $score ) ? (int) $score : null,
-				'metaTitle'       => psr_meta_text( $id, 'rank_math_title' ),
-				'metaDescription' => psr_meta_text( $id, 'rank_math_description' ),
-				'noindex'         => psr_noindex( $id ),
-			);
+		foreach ( array_chunk( $ids, PSR_SEO_CHUNK ) as $chunk ) {
+			$meta = psr_seo_meta( $chunk );
+			_prime_post_caches( $chunk, true, false ); // the chunk's posts in one query, with their terms (a %category% permalink), without any meta
+			foreach ( $chunk as $id ) {
+				$m       = isset( $meta[ $id ] ) ? $meta[ $id ] : array();
+				$kw      = psr_plain( isset( $m['rank_math_focus_keyword'] ) ? $m['rank_math_focus_keyword'] : null );
+				$score   = isset( $m['rank_math_seo_score'] ) ? trim( (string) $m['rank_math_seo_score'] ) : '';
+				$items[] = array(
+					'id'              => $id,
+					'type'            => $type,
+					'url'             => get_permalink( $id ),
+					'title'           => (string) psr_plain( get_post_field( 'post_title', $id, 'raw' ) ),
+					'focusKeywords'   => null === $kw ? array() : array_values( array_filter( array_map( 'trim', explode( ',', $kw ) ), 'strlen' ) ),
+					'seoScore'        => is_numeric( $score ) ? (int) $score : null,
+					'metaTitle'       => psr_plain( isset( $m['rank_math_title'] ) ? $m['rank_math_title'] : null ),
+					'metaDescription' => psr_plain( isset( $m['rank_math_description'] ) ? $m['rank_math_description'] : null ),
+					'noindex'         => psr_noindex( isset( $m['rank_math_robots'] ) ? $m['rank_math_robots'] : null ),
+				);
+				// A page builder's content can be megabytes: drop the post from the object cache now.
+				// (Not clean_post_cache(): for pages it runs one extra query per post to find children.)
+				wp_cache_delete( $id, 'posts' );
+			}
 		}
 	}
 
 	return array(
-		'plugin' => array( 'name' => 'rank_math', 'version' => defined( 'RANK_MATH_VERSION' ) ? (string) RANK_MATH_VERSION : '' ),
+		'plugin' => array( 'name' => 'rank_math', 'version' => defined( 'RANK_MATH_VERSION' ) ? (string) RANK_MATH_VERSION : null ),
 		'types'  => $summary,
 		'items'  => $items,
 	);

@@ -61,9 +61,11 @@ Reads Rank Math's own post meta. It derives nothing, never resolves Rank Math's 
 ```
 
 - `plugin` is `null`, `types` is `{}` and `items` is `[]` when Rank Math is not active (network-active counts). No other SEO plugin is read.
-- Published `page` and `post`, and `product` when that post type exists, newest first, at most 500 per type. `types.<type>.items` is how many are returned and `truncated` is `true` when more than 500 exist.
-- `focusKeywords` is Rank Math's comma list, trimmed, empties dropped; `[]` when unset or blank.
+- Published `page` and `post`, and `product` when that post type exists, at most 500 per type. `types.<type>.items` is how many are returned and `truncated` is `true` when more than 500 exist.
+- `title`, `focusKeywords`, `metaTitle` and `metaDescription` are plain text: markup stripped, entities decoded, trimmed. `focusKeywords` is Rank Math's comma list with empties dropped; `[]` when unset or blank.
 - `seoScore` is Rank Math's stored score as an integer, or `null`.
 - `metaTitle` and `metaDescription` are the post's own Rank Math values, or `null` when empty (the post uses Rank Math's template).
 - `noindex` is `true` or `false` when the post sets its own robots in Rank Math (`rank_math_robots` holds a non-empty list; `true` when it contains `noindex`). It is `null` when the post has none, i.e. it follows Rank Math's defaults for its type (not resolved here).
-- `title` is the post title with entities decoded; `url` is its permalink.
+- `title` is the post's own title (no "Protected:" or "Private:" prefix); `url` is its permalink. Order within a type is newest first, ties by id descending.
+- `plugin.version` is `null` if Rank Math does not expose its version constant.
+- Only Rank Math's own meta keys are read (never the rest of a post's meta), so a page-builder site's large posts are not loaded.
