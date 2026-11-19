@@ -20,8 +20,9 @@ if ( ! defined( 'ABSPATH' ) ) {
 define( 'PUZZLES_SITE_REPORTS_VERSION', '1.0.0' );
 define( 'PUZZLES_SITE_REPORTS_OPTION', 'puzzles_site_reports_token' );
 define( 'PUZZLES_SITE_REPORTS_NAMESPACE', 'puzzles-reports/v1' );
-// The self-update's constants ("Self-update" below), defined before any include so that none can define them first. No
-// filter changes them: the smoke test builds its own zip with other values (scripts/build.sh --test-overrides).
+// The self-update's constants ("Self-update" below), defined before any other file is loaded, so that none can define
+// them first. No filter changes them: the smoke test builds its own zip with other values (scripts/build.sh
+// --test-overrides).
 define( 'PUZZLES_SITE_REPORTS_MANIFEST_URL', 'https://github.com/puzzles-consulting/wp-site-reports/releases/latest/download/manifest.json' );
 define( 'PUZZLES_SITE_REPORTS_PACKAGE_PREFIX', 'https://github.com/puzzles-consulting/wp-site-reports/releases/download/' );
 // Base64 Ed25519 public key of the release signing key (created 2026-11-19; the secret key is held outside GitHub).

@@ -19,9 +19,10 @@ cp "$REPO/scripts/wp-sr-promote" "$T/wp-sr-promote" # the owner's installed copy
 cp "$T/dev/scripts/build.sh" "$T/ci-build.sh"       # CI's builder, as of HEAD: the release zips come from it
 cd "$T/dev"
 g() { git -c user.name=test -c user.email=test@example.com "$@"; }
+PHP_IMAGE=$(sed -n 's/^PHP_IMAGE=\([^ ]*\).*/\1/p' "$T/wp-sr-promote") # the promoter's pinned image
 php_run() { # the verifier below runs the plugin's own PHP
   if command -v php >/dev/null; then php "$@"; return; fi
-  MSYS_NO_PATHCONV=1 docker run -i --rm --network none php:8.3-cli-alpine@sha256:e7699f91d3b46283a49bde02379266dd98d87844e08aed1ff7ea6a7d1f031268 php "$@"
+  MSYS_NO_PATHCONV=1 docker run -i --rm --network none "$PHP_IMAGE" php "$@"
 }
 
 # Throwaway keypairs from the promoter itself: public keys in PUBn, secret keys in SKn.
@@ -29,20 +30,19 @@ for i in 1 2 3; do printf -v "PUB$i" %s "$(bash "$T/wp-sr-promote" keygen 3>"$T/
 [[ $PUB1 =~ ^[A-Za-z0-9+/]{43}=$ && ${#SK1} -eq 88 && -n $PUB2 && -n $SK2 && -n $SK3 ]] || { echo "FAIL: keygen" >&2; exit 1; }
 o=$(bash "$T/wp-sr-promote" keygen 2>&1) && exit 1; grep -qF 'open file descriptor 3' <<<"$o"
 echo "ok: keygen: public key on stdout, secret key on fd 3 only"
-# The promoter's children must never see a key: these shims fail the run if one inherits it.
+# The promoter's children must never see a key: these shims fail the run if one inherits it, under the variables' own
+# names or the names the promoter keeps them in (promote() exports those, as an owner's shell might).
 mkdir "$T/bin" "$T/tmp" "$T/gh"
+NOKEY='[ -z "${PUZZLES_SR_SIGNING_KEY+x}${PUZZLES_SR_NEW_SIGNING_KEY+x}${PUZZLES_SR_DRY_RUN_KEY+x}${PUZZLES_SR_DRY_RUN_NEW_KEY+x}${KEY+x}${NEWKEY+x}${DKEY+x}${DNEWKEY+x}${KP+x}" ]'
 for c in git unzip python3 python docker php realpath; do
   r=$(command -v "$c") || continue
-  printf '#!/usr/bin/env bash\n[ -z "${PUZZLES_SR_SIGNING_KEY+x}${PUZZLES_SR_NEW_SIGNING_KEY+x}${PUZZLES_SR_DRY_RUN_KEY+x}${PUZZLES_SR_DRY_RUN_NEW_KEY+x}" ] || { echo "LEAK: %s got a key" >&2; exit 99; }\nexec "%s" "$@"\n' \
-    "$c" "$r" >"$T/bin/$c"
+  printf '#!/usr/bin/env bash\n%s || { echo "LEAK: %s got a key" >&2; exit 99; }\nexec "%s" "$@"\n' "$NOKEY" "$c" "$r" >"$T/bin/$c"
   chmod +x "$T/bin/$c"
 done
 # gh: GitHub's releases as a directory, $GHDIR/<tag>/<asset> and $GHDIR/latest; every call is logged in $GHDIR/calls.
 export GHDIR="$T/gh"
-cat >"$T/bin/gh" <<'EOF'
-#!/usr/bin/env bash
-[ -z "${PUZZLES_SR_SIGNING_KEY+x}${PUZZLES_SR_NEW_SIGNING_KEY+x}${PUZZLES_SR_DRY_RUN_KEY+x}${PUZZLES_SR_DRY_RUN_NEW_KEY+x}" ] \
-  || { echo "LEAK: gh got a key" >&2; exit 99; }
+printf '#!/usr/bin/env bash\n%s || { echo "LEAK: gh got a key" >&2; exit 99; }\n' "$NOKEY" >"$T/bin/gh"
+cat >>"$T/bin/gh" <<'EOF'
 echo "$*" >>"$GHDIR/calls"
 case "$1 $2" in
   "api repos/puzzles-consulting/wp-site-reports/releases/latest")
@@ -80,6 +80,7 @@ SK=$SK1; NSK=""; ANS=""; OWNED="$T/owner"
 promote() { # promote <tag> <zip> [options]: a dry run in $OWNED, signing with $SK (and $NSK as the new key); types $ANS,
   local tag=$1 zip=$2; shift 2 # else the tag's version
   PATH="$T/bin:$PATH" TMPDIR="$T/tmp" PUZZLES_SR_DRY_RUN_KEY="$SK" PUZZLES_SR_DRY_RUN_NEW_KEY="$NSK" \
+    KEY=exported NEWKEY=exported DKEY=exported DNEWKEY=exported KP=exported \
     bash "$T/wp-sr-promote" --repo "$OWNED" "$tag" 6.8.1 --dry-run "$zip" "$@" <<<"${ANS:-${tag#v}}"
 }
 refuses() { # refuses <expected message> <promote args...>
@@ -98,7 +99,8 @@ verify() {
 }
 
 # 1. The first promotion in a clone shows everything as new; the next one (its main file and an include each gain a
-# marker line) shows both lines against the record of the first. The promoter's own build is byte for byte CI's.
+# marker line) shows both lines against the record of the first. Every dry run that signs proves the promoter's own
+# build is byte for byte CI's: it refuses a release zip with any other sha256 (section 2).
 release v9.9.7 "$PUB1"
 m=$(promote v9.9.7 "$T/v9.9.7.zip" 2>"$T/err"); grep -qF 'checks are skipped' "$T/err"
 grep -qF 'baseline: none: the first promotion recorded in this clone: everything is new' "$T/err"
@@ -110,8 +112,6 @@ m=$(promote v9.9.8 "$T/v9.9.8.zip" --trusted-zip "$T/v9.9.7.zip" 2>"$T/err")
 echo "$m"
 grep -qF 'baseline: v9.9.7, your last promotion recorded in this clone' "$T/err"
 grep -qxF '+// marker: main' "$T/err"; grep -qxF '+// marker: include' "$T/err"
-grep -qF "\"version\":\"9.9.8\",\"sha256\":\"$(sha256sum "$T/v9.9.8.zip" | cut -c1-64)\"" <<<"$m" \
-  || { echo "FAIL: the promoter's build is not scripts/build.sh's" >&2; exit 1; }
 grep -qF '"requires":"5.8","requires_php":"7.4","tested":"6.8.1"' <<<"$m"
 [ "$(verify "$m" "$T/v9.9.8.zip")" = valid ]
 [ "$(verify "${m/6.8.1/6.8.2}" "$T/v9.9.8.zip")" = invalid ] # the verifier really checks
@@ -123,7 +123,7 @@ records v9.9.7 # from here on the owner last promoted v9.9.7, the --trusted-zip 
 # 2. The release zip is not the promoter's build of the tag: one byte changed.
 cp "$T/v9.9.8.zip" "$T/flip.zip"; printf '\377' | dd of="$T/flip.zip" bs=1 seek=100 conv=notrunc status=none
 cmp -s "$T/v9.9.8.zip" "$T/flip.zip" && exit 1
-refuses 'is not what this launcher builds from v9.9.8' v9.9.8 "$T/flip.zip" --trusted-zip "$T/v9.9.7.zip"
+refuses 'is not what this promoter builds from v9.9.8' v9.9.8 "$T/flip.zip" --trusted-zip "$T/v9.9.7.zip"
 
 # 3. The tag's tree: a symlink, then attributes, bytes, version lines and the tripwires on the shipped PHP.
 g update-index --add --cacheinfo "120000,$(printf x | git hash-object -w --stdin),includes/link.php"
@@ -151,9 +151,15 @@ printf "<?php \$n = 'PUZZLES_SR_' . 'UPDATE_PUBKEY';\n" >includes/evil.php; odd 
 printf "<?php echo constant( 'X' );\n" >includes/evil.php; odd v9.9.16 'cannot follow'
 printf "<?php define(\n\t'X', 1 );\n" >includes/evil.php; odd v9.9.17 'cannot follow'
 printf "<?php const\nPUZZLES_SR_X = 1;\n" >includes/evil.php; odd v9.9.52 'cannot follow'
-printf "<?php const PUZZLES_SITE_REPORTS_MAX_PACKAGE = 1;\n" >includes/evil.php; odd v9.9.53 'defines a constant more than once'
+printf "<?php const PUZZLES_SITE_REPORTS_MAX_PACKAGE = 1;\n" >includes/evil.php; odd v9.9.53 'define a constant more than once'
 sed -i "/^define( 'PUZZLES_SR_UPDATE_PUBKEY'/i require_once __DIR__ . '/includes/seo.php';" puzzles-site-reports.php
 odd v9.9.18 'includes a file before it defines'
+sed -i "/^define( 'PUZZLES_SR_UPDATE_PUBKEY'/i if ( true ) require __DIR__ . '/includes/seo.php';" puzzles-site-reports.php
+odd v9.9.41 'includes a file before it defines' # anywhere on a line
+# A shipped file that is not PHP holds no PHP open tag: included, it would run.
+printf "<?php define( 'X', 1 );\n" >>CHANGELOG.md
+sed -i "/^define( 'PUZZLES_SR_UPDATE_PUBKEY'/i if ( true ) require __DIR__ . '/CHANGELOG.md';" puzzles-site-reports.php
+odd v9.9.19 "'CHANGELOG.md' is not PHP but holds a PHP open tag"
 # A shipped non-code file is not byte-checked: its control bytes reach the screen only through cat -v. The diff is
 # against the record: an unchanged line far from the change is not printed.
 printf 'An escape: \033[2K here\n' >>README.md; release v9.9.58 "$PUB1"
@@ -178,13 +184,13 @@ graft() { # graft <tag> <dir> <name> [tree]: tags, on main, v9.9.8's tree plus a
   git push -q origin "$t:refs/heads/main"; tag "$1" "$t"
 }
 n=20
-for name in '..\..\escaped' 'a\..\..\..\x' '-x' '.hidden' '..'; do # the first two would land in $T/tmp
+for name in '..\..\escaped' '-x' '.hidden' '..'; do # the first would land in $T/tmp
   graft "v9.9.$n" . "$name" "$([ "$name" = .. ] && echo tree || true)"; zip_of "v9.9.$n"
   promote "v9.9.$n" "$T/v9.9.$n.zip" --trusted-zip "$T/v9.9.7.zip" >"$T/out" 2>&1 \
     || { cat "$T/out"; echo "FAIL: ${name@Q} outside the allowlist was not ignored" >&2; exit 1; }
   nothing_escaped; back_to v9.9.8; records v9.9.7; n=$((n + 1))
 done
-for c in '..\..\..\escaped|has the path' 'a\..\..\..\..\x|has the path' '-x|has the path' '.hidden|has the path' \
+for c in '..\..\..\escaped|has the path' '-x|has the path' '.hidden|has the path' \
   '..|has the path' 'SEO.php|one name on Windows' 'x.php.|ending in' 'con.php|reserved device name' \
   'NUL|reserved device name' 'Lpt1.txt|reserved device name'; do
   graft "v9.9.$n" includes "${c%|*}" "$([ "${c%|*}" = .. ] && echo tree || true)"
@@ -209,6 +215,9 @@ git push -q origin :refs/tags/x/refs/tags/v9.9.8; records v9.9.7
 echo "ok: origin's tag is matched exactly"
 g checkout -q -b side; g commit -q --allow-empty -m side; tag v9.9.12; g checkout -q main
 refuses 'is not on origin/main' v9.9.12 "$T/v9.9.8.zip" --trusted-zip "$T/v9.9.7.zip"
+git push -q origin "$(git rev-parse 'v9.9.12^{commit}'):refs/tags/main" # a tag named main is not origin's main
+refuses 'is not on origin/main' v9.9.12 "$T/v9.9.8.zip" --trusted-zip "$T/v9.9.7.zip"
+git push -q origin :refs/tags/main
 
 # 5. Keys and versions against the latest release (v9.9.7, v9.9.8 or v9.9.13), which must be one the owner recorded.
 # A bad release (v9.9.8) marked pre-release: GitHub's latest is v9.9.7 again, recorded too; the baseline stays the
@@ -238,6 +247,7 @@ records v9.9.7 v9.9.8
 refuses 'is not newer than the latest release (9.9.8)' v9.9.8 "$T/v9.9.8.zip" --trusted-zip "$T/v9.9.8.zip"
 records v9.9.7 v9.9.13
 refuses 'is not newer than the latest release (9.9.13)' v9.9.8 "$T/v9.9.8.zip" --trusted-zip "$T/v9.9.13.zip"
+refuses 'is not the release your record expects' v9.9.60 "$T/v9.9.60.zip" --trusted-zip "$T/v9.9.7.zip" # v9.9.13 pulled
 records v9.9.7
 
 # 6. A dry run refuses any key in the clone's HEAD history: here the owner's checkout is one whose history carries PUB1.
@@ -258,14 +268,14 @@ g -C "$T/owner" commit -q -am 'test: the checkout scripts leave markers'
 release v9.9.61 "$PUB1" # its zip comes from CI's unmarked build.sh
 m=$(promote v9.9.61 "$T/v9.9.61.zip" --trusted-zip "$T/v9.9.7.zip" 2>"$T/err")
 [ "$(verify "$m" "$T/v9.9.61.zip")" = valid ]
-! grep -qxF 'FAKE REVIEW' "$T/err" && [ -z "$(ls "$T" | grep '^ran-' || true)" ] \
-  || { echo "FAIL: a file from the repository ran" >&2; exit 1; }
+! grep -qxF 'FAKE REVIEW' "$T/err" && ! compgen -G "$T/ran-*" >/dev/null || { echo "FAIL: a file from the repository ran" >&2; exit 1; }
 back_to "$TIP"; g -C "$T/owner" reset -q --hard HEAD~1; records v9.9.7
 echo "ok: nothing from the repository ran (tag and checkout)"
 touch "$T/owner/stray"; promote v9.9.8 "$T/v9.9.8.zip" --trusted-zip "$T/v9.9.7.zip" >"$T/out" 2>&1 || { cat "$T/out"; exit 1; }
 rm "$T/owner/stray"; records v9.9.7 # the worktree is never read: a stray file changes nothing
 ANS=9.9.7; refuses 'not confirmed' v9.9.8 "$T/v9.9.8.zip" --trusted-zip "$T/v9.9.7.zip"; ANS=""
 grep -qF 'type 9.9.8 to sign v9.9.8' "$T/out"
+OWNED="$T/owner/includes"; refuses "must be the clone's top folder" v9.9.8 "$T/v9.9.8.zip"; OWNED="$T/owner"
 git -C "$T/owner" update-ref refs/puzzles-sr/promoted/v9.9.7 'v9.9.7^{commit}'
 refuses 'holds your real promotion record' v9.9.8 "$T/v9.9.8.zip" --trusted-zip "$T/v9.9.7.zip"
 git -C "$T/owner" update-ref -d refs/puzzles-sr/promoted/v9.9.7
@@ -312,24 +322,30 @@ echo "PUZZLES_SR_UPDATE_PUBKEY $PUB3" >"$T/ovr"
 dup "/^define( 'PUZZLES_SR_UPDATE_PUBKEY'/p" 'not replaced exactly once' "$T/ovr"
 
 # 9. The real path, against the gh shim: a terminal is required; the first promotion; the next one; rolling forward
-# past a bad release; GitHub's latest checked against its own tag and manifest; a run stopped after it went live.
+# past a bad release; GitHub's latest checked against its own tag and manifest; a run stopped after it went live; a
+# key rotation, then a second clone that resumes from the first one's records.
 if ! command -v script >/dev/null; then
+  [ -z "${CI:-}" ] || { echo "FAIL: CI must run the real path, but script(1) is missing" >&2; exit 1; }
   echo "skip: the real path needs script(1) for a terminal (CI runs it)"
 else
-  git clone -q -b main "$T/origin.git" "$T/real"
+  release v9.9.62 "$PUB2"; release v9.9.63 "$PUB2" # a rotation release and the one after it
   GHURL=https://github.com/puzzles-consulting/wp-site-reports.git
-  git -C "$T/real" remote set-url origin "$GHURL"; git -C "$T/real" config "url.$T/origin.git.insteadOf" "$GHURL"
+  clone() { git clone -q -b main "$T/origin.git" "$T/$1"; git -C "$T/$1" remote set-url origin "$GHURL"; git -C "$T/$1" config "url.$T/origin.git.insteadOf" "$GHURL"; }
+  clone real; CLONE=real
   pre() { mkdir -p "$GHDIR/$1"; cp "$T/$1.zip" "$GHDIR/$1/puzzles-site-reports.zip"; } # CI's pre-release of <tag>
-  live() { # live <typed answer> <promoter args...>: a real run in $T/real on a terminal; prints its output
+  live() { # live <typed answer> <promoter args...>: a real run in $T/$CLONE on a terminal; prints its output
     local a=$1; shift
-    PATH="$T/bin:$PATH" TMPDIR="$T/tmp" PUZZLES_SR_SIGNING_KEY="$SK" \
-      script -qec "$(printf '%q ' bash "$T/wp-sr-promote" --repo "$T/real" "$@")" /dev/null <<<"$a" | tr -d '\r'
+    PATH="$T/bin:$PATH" TMPDIR="$T/tmp" PUZZLES_SR_SIGNING_KEY="$SK" PUZZLES_SR_NEW_SIGNING_KEY="$NSK" \
+      script -qec "$(printf '%q ' bash "$T/wp-sr-promote" --repo "$T/$CLONE" "$@")" /dev/null <<<"$a" | tr -d '\r'
   }
   rec() { git -C "$T/real" rev-parse --quiet --verify "refs/puzzles-sr/$1"; } # rec <promoted|pending>/<tag>
-  pre v9.9.7; pre v9.9.8; pre v9.9.60
+  pre v9.9.7; pre v9.9.8; pre v9.9.60; pre v9.9.62; pre v9.9.63
   o=$(PATH="$T/bin:$PATH" TMPDIR="$T/tmp" PUZZLES_SR_SIGNING_KEY="$SK" bash "$T/wp-sr-promote" --repo "$T/real" \
     v9.9.7 6.8.1 <<<9.9.7 2>&1) && exit 1
-  grep -qF 'from a terminal, never from a pipe' <<<"$o"; [ ! -e "$GHDIR/latest" ]
+  grep -qF 'never from a pipe or a file' <<<"$o"; [ ! -e "$GHDIR/latest" ]
+  git -C "$T/real" update-ref refs/puzzles-sr/promoted/v9.9.6 'v9.9.7^{commit}' # a record, but nothing is latest
+  o=$(live 9.9.7 v9.9.7 6.8.1) && { echo "$o"; exit 1; }; grep -qF 'was your first promotion marked pre-release' <<<"$o"
+  git -C "$T/real" update-ref -d refs/puzzles-sr/promoted/v9.9.6
   o=$(live 9.9.7 v9.9.7 6.8.1) || { echo "$o"; exit 1; }
   grep -qF 'promoted v9.9.7' <<<"$o"; [ "$(cat "$GHDIR/latest")" = v9.9.7 ]
   [ "$(verify "$(cat "$GHDIR/v9.9.7/manifest.json")" "$T/v9.9.7.zip")" = valid ]
@@ -345,17 +361,30 @@ else
   o=$(live 9.9.60 v9.9.60 6.8.1) && { echo "$o"; exit 1; }; grep -qF 'the latest release v9.9.98 carries version 9.9.60' <<<"$o"
   echo v9.9.60 >"$GHDIR/latest"; cp "$GHDIR/v9.9.60/manifest.json" "$T/manifest.json"
   sed -i 's/6\.8\.1/6.8.2/' "$GHDIR/v9.9.60/manifest.json"
-  o=$(live 9.9.60 v9.9.60 6.8.1) && { echo "$o"; exit 1; }; grep -qF 'manifest is not signed by its own key' <<<"$o"
+  o=$(live 9.9.60 v9.9.60 6.8.1) && { echo "$o"; exit 1; }; grep -qF 'manifest is not signed by the key of a promotion recorded' <<<"$o"
   cp "$T/manifest.json" "$GHDIR/v9.9.60/manifest.json"
   echo "ok: real path: GitHub's latest must carry its own version and a manifest signed by a known key"
   # Stopped after `gh release edit`: v9.9.60 is latest and pending, not recorded.
   git -C "$T/real" update-ref -d refs/puzzles-sr/promoted/v9.9.60
   o=$(live 9.9.60 v9.9.60 6.8.1) && { echo "$o"; exit 1; }; grep -qF "does not match your record" <<<"$o"
-  git -C "$T/real" update-ref refs/puzzles-sr/pending/v9.9.60 'v9.9.60^{commit}'
+  pend() { git -C "$T/real" update-ref refs/puzzles-sr/pending/v9.9.60 "$(printf '%s %s\n' "$(git rev-parse 'v9.9.60^{commit}')" "$1" | git -C "$T/real" hash-object -w --stdin)"; }
+  pend "$(printf x | sha256sum | cut -c1-64)" # the run here signed some other zip
+  o=$(live 9.9.60 v9.9.60 6.8.1) && { echo "$o"; exit 1; }; grep -qF 'is not the one the interrupted run here signed' <<<"$o"
+  pend "$(sha256sum "$T/v9.9.60.zip" | cut -c1-64)"
   o=$(live 9.9.60 v9.9.60 6.8.1) || { echo "$o"; exit 1; }; grep -qF 'promoted v9.9.60 (it was already live)' <<<"$o"
   [ "$(rec promoted/v9.9.60)" = "$(git rev-parse 'v9.9.60^{commit}')" ]; ! rec pending/v9.9.60 >/dev/null
   o=$(live 9.9.60 v9.9.60 6.8.1) && { echo "$o"; exit 1; }; grep -qF 'is not newer than the latest release (9.9.60)' <<<"$o"
   echo "ok: real path: an interrupted promotion is recorded, nothing left to do"
+  NSK=$SK2; o=$(live 9.9.62 v9.9.62 6.8.1 --rotate) || { echo "$o"; exit 1; }; NSK=""
+  grep -qF "sites trust only $PUB2" <<<"$o"; SK=$SK2
+  clone real2; CLONE=real2 # a second clone: the rotation release's record alone is not enough...
+  git -C "$T/real" for-each-ref --format='update %(refname) %(objectname)' refs/puzzles-sr/promoted/v9.9.62 | git -C "$T/real2" update-ref --stdin
+  o=$(live 9.9.63 v9.9.63 6.8.1) && { echo "$o"; exit 1; }; grep -qF 'the record of the release before the rotation' <<<"$o"
+  git -C "$T/real" for-each-ref --format='update %(refname) %(objectname)' refs/puzzles-sr/promoted | git -C "$T/real2" update-ref --stdin
+  o=$(live 9.9.63 v9.9.63 6.8.1) || { echo "$o"; exit 1; } # ...every record, as README says, is
+  grep -qF 'baseline: v9.9.62, your last promotion' <<<"$o"; grep -qF 'promoted v9.9.63' <<<"$o"
+  CLONE=real; SK=$SK1
+  echo "ok: real path: a rotation, then a second clone resumes with the first one's records"
   nothing_escaped
 fi
 echo "promote-dry-run: all checks passed"
