@@ -14,8 +14,10 @@ bash tests/promote-dry-run.sh                             # tests the committed 
 `build.sh` writes a byte-reproducible `dist/puzzles-site-reports.zip`; `smoke.sh` boots WordPress in Docker, installs
 that zip and runs every `case_*` function (the update cases on a test build, `build.sh --test-overrides`). It tears
 the stack down on exit (`docker compose down -v`), also on failure: never leave containers running. On Windows Git
-Bash `smoke.sh` exports `MSYS_NO_PATHCONV=1`. `promote-dry-run.sh` runs `scripts/promote.sh --dry-run` against a
-throwaway origin and keys. CI (`.github/workflows/ci.yml`) runs `php -l` on 7.4 to 8.4 plus both tests.
+Bash `smoke.sh` exports `MSYS_NO_PATHCONV=1`. `promote-dry-run.sh` runs the promotion (`scripts/launcher.sh` running
+the recorded `scripts/promote.sh`) against a throwaway origin, keys and a stand-in for `gh`; its real-path section
+needs `script(1)` for a terminal, so it is skipped in Git Bash and runs in CI. CI (`.github/workflows/ci.yml`) runs
+`php -l` on 7.4 to 8.4 plus both tests.
 
 ## Hard rules
 
@@ -34,10 +36,12 @@ throwaway origin and keys. CI (`.github/workflows/ci.yml`) runs `php -l` on 7.4 
 
 - The route contract lives in [`docs/contract.md`](./docs/contract.md); update it in the same commit
   as any route change, plus `CHANGELOG.md` under `[Unreleased]`.
-- Zip top folder is `puzzles-site-reports/`; `build.sh` rewrites `Version:` and
-  `PUZZLES_SITE_REPORTS_VERSION` to its argument.
+- Zip top folder is `puzzles-site-reports/`; `build.sh` rewrites the main file's one ` * Version: X.Y.Z` line and its
+  one `define( 'PUZZLES_SITE_REPORTS_VERSION', 'X.Y.Z' );` line to its argument (keep both exactly in that form).
 - Signed updates, promotion and key rotation: README, Updates and Release; the checks themselves are in the headers of
-  `scripts/build.sh` and `scripts/promote.sh` (the signing key never goes into GitHub). A change to `build.sh`'s output
-  makes `promote.sh` refuse every release tagged before it (their zips no longer match its build).
+  `scripts/build.sh`, `scripts/launcher.sh` and `scripts/promote.sh` (the signing key never goes into GitHub).
+  Promotion runs `scripts/` as of the owner's last recorded promotion, never the checkout's: a change to `scripts/`
+  takes effect one promotion later, and a change to `build.sh`'s output needs `--trust-checkout` for the release that
+  carries it. `scripts/launcher.sh` is installed by hand: keep it small and stable.
 - Commits are authored as `Puzzles Internal <internal@puzzles.consulting>`; the why goes in the body.
 - Pushing waits for the owner's OK.

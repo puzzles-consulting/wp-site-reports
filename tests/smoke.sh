@@ -34,7 +34,7 @@ put_mu() { # put_mu <file> <php>: writes a must-use plugin (base64 through wp ev
 rm_mu() { wpcli eval "unlink( WPMU_PLUGIN_DIR . '/$1' );"; } # rm_mu <file>
 
 # A throwaway Ed25519 keypair signs this run's manifests. case_update_offer installs a test build of the same tree whose
-# update constants point at this stack and this key (scripts/build.sh --test-overrides); the release zip has no such hook.
+# update constants point at this stack and this key (scripts/build.sh --test-overrides); the release zip keeps the real ones.
 kp=$(wpcli eval '$k = sodium_crypto_sign_keypair(); echo base64_encode( $k ), " ", base64_encode( sodium_crypto_sign_publickey( $k ) );' | tr -d '\r\n')
 KP=${kp% *}; PK=${kp#* }
 [ "${#KP}" -eq 128 ] # base64 of the 96-byte keypair

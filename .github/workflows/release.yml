@@ -1,6 +1,6 @@
 name: Release
 # A `vX.Y.Z` tag: PHP lint on 7.4 to 8.4, build, smoke on that exact zip, then a PRE-release of the zip alone (no manifest:
-# no site sees it until the owner signs and promotes it with scripts/promote.sh, README > Release).
+# no site sees it until the owner signs and promotes it with the launcher, README > Release).
 on:
   push:
     tags: ['v*']
@@ -43,7 +43,7 @@ jobs:
         run: |
           WP="$(cat tests/out/wp-version.txt)"
           [[ "$WP" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "bad WordPress version: $WP" >&2; exit 1; }
-          # Data only, never a command: the owner types `tested` into scripts/promote.sh (README, Release).
+          # Data only, never a command: the owner types `tested` into the promotion (README, Release).
           gh release create "$TAG" dist/puzzles-site-reports.zip --prerelease --generate-notes \
             --notes "Tested with WordPress $WP"
         env:
