@@ -170,9 +170,9 @@ add_action(
 // (README, Release): write access to the repository alone cannot ship a zip to the sites.
 define( 'PUZZLES_SITE_REPORTS_MANIFEST_URL', 'https://github.com/puzzles-consulting/wp-site-reports/releases/latest/download/manifest.json' );
 define( 'PUZZLES_SITE_REPORTS_PACKAGE_PREFIX', 'https://github.com/puzzles-consulting/wp-site-reports/releases/download/' );
-// Base64 Ed25519 public key of the release signing key. PLACEHOLDER: empty until the owner's key exists, which
-// rejects every manifest (no update is offered).
-define( 'PUZZLES_SR_UPDATE_PUBKEY', '' );
+// Base64 Ed25519 public key of the release signing key (created 2026-11-19; the secret key is held outside GitHub).
+// A new key means a release that ships the new public key, signed with the old one.
+define( 'PUZZLES_SR_UPDATE_PUBKEY', 'x+RJSe516KyRf6lm8ooy1VgB3on7C/zYDjvYEoPgBBQ=' );
 
 /** The release asset of a version. The prefix filter is test-only (the smoke serves its own releases). */
 function puzzles_sr_package_url( string $version ): string {
