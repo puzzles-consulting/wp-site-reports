@@ -20,7 +20,6 @@ In wp-admin, open **Tools → Site Reports → Create connection** (on a multisi
 `wp puzzles-site-reports connect --porcelain`. Paste the string it prints into the portal's Report setup. It is shown
 once, and creating a new connection stops the previous one at once. The routes and the authentication are in
 [`docs/contract.md`](https://github.com/puzzles-consulting/wp-site-reports/blob/main/docs/contract.md).
-Deactivating the plugin deletes the connection; after reactivating, create a new one.
 
 ## Updates
 

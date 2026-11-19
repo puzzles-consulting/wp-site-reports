@@ -56,7 +56,16 @@ function puzzles_sr_create_connection() {
 	return 'pzr1.' . rtrim( strtr( base64_encode( $payload ), '+/', '-_' ), '=' );
 }
 
-function puzzles_sr_disconnect(): void {
+/** Deletes the token; a network deactivation deletes every site's. */
+function puzzles_sr_disconnect( $network_wide = false ): void {
+	if ( $network_wide && is_multisite() ) {
+		foreach ( get_sites( array( 'fields' => 'ids', 'number' => 0 ) ) as $id ) {
+			switch_to_blog( $id );
+			delete_option( PUZZLES_SITE_REPORTS_OPTION );
+			restore_current_blog();
+		}
+		return;
+	}
 	delete_option( PUZZLES_SITE_REPORTS_OPTION );
 }
 // Deactivating the plugin revokes the connection. (Core deactivates silently while it updates a plugin: no hook runs, the token survives.)
@@ -117,7 +126,7 @@ add_filter(
 
 // Core's index lists every namespace, and the namespace's own index route (/puzzles-reports/v1, which core registers
 // with the first route), even when our routes are hidden (show_in_index => false): drop both. (A direct request to
-// /puzzles-reports/v1 is still answered by core, so the plugin's presence is not fully hidden.)
+// /puzzles-reports/v1 without a valid token gets our 401, which still tells it apart from a site without the plugin.)
 add_filter(
 	'rest_index',
 	function ( $response ) {

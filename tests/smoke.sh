@@ -211,6 +211,9 @@ Version: 1.2.3
   ! grep -q 'PSR-long-marker' out/status.json || return 1               # shortMsg, never longMsg
   ! grep -q 'private-data' out/status.json || return 1                  # Wordfence's per-issue data never leaves
   ! grep -qE '/var/www|passwd|inetpub' out/status.json || return 1      # no server path anywhere
+  # the scrub itself: paths after ":" or "=.:" go, a root only matches at a path boundary (ABSPATH is /var/www/html/), URLs stay
+  o=$(wpcli eval 'echo puzzles_sr_scrub_paths( "A open_basedir:/home/x/secret B include_path=.:/usr/share/php C /var/wwwdata/x D https://example.com/a E" );' | tr -d '\r\n')
+  [ "$o" = "A open_basedir: B include_path=.: C  D https://example.com/a E" ]
   jq -e '.wordpress.updatesCheckedAt != null' out/status.json
   jq -e '.plugins[] | select(.file == "akismet/akismet.php") | .active == false and .version == "5.0" and (.update | type == "string") and .autoUpdate == true' out/status.json
   jq -e '.plugins[] | select(.file == "puzzles-site-reports/puzzles-site-reports.php") | .autoUpdate == false' out/status.json

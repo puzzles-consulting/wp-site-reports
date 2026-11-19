@@ -25,17 +25,21 @@ function puzzles_sr_updates_checked_at( array $transients ): ?string {
 	return puzzles_sr_iso( $oldest );
 }
 
-/** $s without absolute server paths: the content dir becomes "wp-content", the install root and its parent disappear, then any other absolute path. */
+/**
+ * $s without absolute server paths: the content dir becomes "wp-content", the install root and its parent disappear,
+ * then any other absolute path. A root counts only at a path boundary (followed by a separator or where the path ends),
+ * so "/var/www" never eats the start of "/var/wwwdata/x".
+ */
 function puzzles_sr_scrub_paths( string $s ): string {
-	$s = str_replace( WP_CONTENT_DIR, 'wp-content', $s );
-	foreach ( array_unique( array( untrailingslashit( ABSPATH ), untrailingslashit( (string) realpath( ABSPATH ) ), dirname( ABSPATH ) ) ) as $root ) {
+	$s = (string) preg_replace( '~' . preg_quote( WP_CONTENT_DIR, '~' ) . '(?=[/\\\\\s"\'<>:;,)\]]|\z)~', 'wp-content', $s );
+	foreach ( array( untrailingslashit( ABSPATH ), untrailingslashit( (string) realpath( ABSPATH ) ), dirname( ABSPATH ) ) as $root ) {
 		if ( strlen( $root ) > 1 ) { // never "/" or "": that would eat every slash
-			$s = str_replace( array( $root . '/', $root ), '', $s );
+			$s = (string) preg_replace( '~' . preg_quote( $root, '~' ) . '(?:[/\\\\]|(?=[\s"\'<>:;,)\]]|\z))~', '', $s );
 		}
 	}
 	// What is left: a Unix (/a/b) or Windows (C:\a, \\host\a) absolute path, starting the text or after a space, quote,
-	// bracket, "=" or ",". A URL's "//" follows a ":" and is kept.
-	return (string) preg_replace( '~(?<![^\s"\'(\[=,])(?:[A-Za-z]:)?[\\\\/][^\s"\'<>]+~', '', $s );
+	// bracket, "=", ",", ";" or ":" (open_basedir:/x, include_path=.:/x). A URL's "://" is kept.
+	return (string) preg_replace( '~(?:(?<![^\s"\'(\[=,;])|(?<=:)(?!//))(?:[A-Za-z]:)?[\\\\/][^\s"\'<>]+~', '', $s );
 }
 
 /** Wordfence's own open issues, ignored count and last scan; null when it is not installed, or active but unreadable. Never starts a scan. */
