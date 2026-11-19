@@ -169,11 +169,12 @@ function psr_update_offer( $update, $plugin_data, $plugin_file ) {
 		return $update;
 	}
 	$m = json_decode( wp_remote_retrieve_body( $res ), true );
-	if ( ! is_array( $m ) || ! isset( $m['version'], $m['package'] ) || ! is_string( $m['version'] ) || ! is_string( $m['package'] ) || '' === $m['version'] ) {
+	if ( ! is_array( $m ) || ! isset( $m['version'], $m['package'] ) || ! is_string( $m['version'] ) || ! is_string( $m['package'] ) || ! preg_match( '/^\d+\.\d+\.\d+$/', $m['version'] ) ) {
 		return $update;
 	}
+	// The package is exactly the asset this release's tag publishes: no other path, no dot segments.
 	$prefix = psr_filtered_string( 'puzzles_site_reports_package_prefix', PUZZLES_SITE_REPORTS_PACKAGE_PREFIX );
-	if ( 0 !== strpos( $m['package'], $prefix ) || ! version_compare( $m['version'], (string) $plugin_data['Version'], '>' ) ) {
+	if ( $m['package'] !== $prefix . 'v' . $m['version'] . '/puzzles-site-reports.zip' || ! version_compare( $m['version'], (string) $plugin_data['Version'], '>' ) ) {
 		return $update;
 	}
 	$opt = function ( $k ) use ( $m ) {

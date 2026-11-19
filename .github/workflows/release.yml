@@ -1,23 +1,46 @@
 name: Release
-# A `v*` tag builds the zip, runs the smoke test on that exact zip and only then publishes a PRE-release.
-# Sites follow `releases/latest`, which GitHub never points at a pre-release: promoting it
+# A `vX.Y.Z` tag lints PHP on every supported version, builds the zip, runs the smoke test on that exact zip and only
+# then publishes a PRE-release. Sites follow `releases/latest`, which GitHub never points at a pre-release: promoting it
 # (`gh release edit vX.Y.Z --prerelease=false --latest`) is what rolls it out.
 on:
   push:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  lint:
     runs-on: ubuntu-latest
-    env:
-      TAG: ${{ github.ref_name }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      matrix:
+        php: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4']
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+      - run: find . -name '*.php' -not -path './tests/*' -print0 | xargs -0 -n1 php -l
+
+  release:
+    needs: lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Tag must be vX.Y.Z
+        run: '[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad tag: $TAG" >&2; exit 1; }'
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - run: bash scripts/build.sh "${TAG#v}"
       - run: bash tests/smoke.sh
       - run: bash scripts/manifest.sh "${TAG#v}"
       - run: gh release create "$TAG" dist/puzzles-site-reports.zip dist/manifest.json --prerelease --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}

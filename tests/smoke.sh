@@ -26,6 +26,12 @@ wpcli core install --url=http://localhost:8080 --title=Smoke --admin_user=admin 
   --admin_password=admin --admin_email=admin@example.com --skip-email
 wpcli plugin install /dist/puzzles-site-reports.zip --activate --force
 
+# Hermetic: the update check reads a manifest served by this stack (http://wp/..., a 404 until case_update_offer writes
+# one), never GitHub's. Present from here on, so no case can reach the real URL.
+mu='<?php add_filter( "puzzles_site_reports_manifest_url", function () { return "http://wp/test-manifest.json"; } ); add_filter( "puzzles_site_reports_package_prefix", function () { return "http://wp/releases/download/"; } );'
+b=$(printf '%s' "$mu" | base64 | tr -d '\n')
+wpcli eval "wp_mkdir_p( WPMU_PLUGIN_DIR ); file_put_contents( WPMU_PLUGIN_DIR . '/psr-update.php', base64_decode( '$b' ) );"
+
 # Apache may lag behind `core install` (which went through WP-CLI): wait until WordPress answers over HTTP.
 for _ in $(seq 1 40); do
   curl -fs -o /dev/null http://localhost:8080/ && break
@@ -208,27 +214,39 @@ case_seo_with_rank_math() {
 }
 
 case_update_offer() { # a local manifest (served by the wp container, reached as http://wp) offers 9.9.9
-  mu='<?php add_filter( "puzzles_site_reports_manifest_url", function () { return "http://wp/test-manifest.json"; } ); add_filter( "puzzles_site_reports_package_prefix", function () { return "http://wp/"; } );'
-  b=$(printf '%s' "$mu" | base64 | tr -d '\n')
-  wpcli eval "wp_mkdir_p( WPMU_PLUGIN_DIR ); file_put_contents( WPMU_PLUGIN_DIR . '/psr-update.php', base64_decode( '$b' ) ); copy( '/dist/puzzles-site-reports.zip', ABSPATH . 'test.zip' );"
+  ours=puzzles-site-reports/puzzles-site-reports.php
+  pkg=http://wp/releases/download/v9.9.9/puzzles-site-reports.zip
   manifest() { # manifest <version> <package>: written into the wp container's web root
     wpcli eval "file_put_contents( ABSPATH . 'test-manifest.json', json_encode( array( 'version' => '$1', 'package' => '$2', 'requires' => '5.8', 'requires_php' => '7.4', 'tested' => '6.9' ) ) );"
   }
   check() { wpcli transient delete update_plugins --network; wpcli eval 'wp_update_plugins();'; }
   offered() { wpcli plugin list --name=puzzles-site-reports --field=update_version | tr -d '\r\n'; }
+  filter() { # filter <installed-version> <plugin-file>: our update filter called directly; "input" is what core handed in
+    wpcli eval "echo wp_json_encode( psr_update_offer( 'input', array( 'Version' => '$1' ), '$2', array() ) );" | tr -d '\r\n'
+  }
 
-  manifest 9.9.9 http://wp/test.zip
+  # no manifest file yet (the setup mu-plugin points at it; WordPress answers its 404): nothing is offered, the input comes back
+  check; [ -z "$(offered)" ]
+  [ "$(filter 1.0.0 "$ours")" = '"input"' ]
+
+  manifest 9.9.9 "$pkg"
   curl -fs http://localhost:8080/test-manifest.json | grep -q '9.9.9'
   check
   [ "$(offered)" = "9.9.9" ]
-  wpcli eval '$u = get_site_transient( "update_plugins" ); echo $u->response["puzzles-site-reports/puzzles-site-reports.php"]->package;' | grep -qx 'http://wp/test.zip'
+  wpcli eval '$u = get_site_transient( "update_plugins" ); echo $u->response["puzzles-site-reports/puzzles-site-reports.php"]->package;' | grep -qx "$pkg"
+  [ "$(filter 1.0.0 "$ours")" != '"input"' ]                  # the offer is real...
+  [ "$(filter 99.0.0 "$ours")" = '"input"' ]                  # ...but not when the installed version is not older
+  [ "$(filter 1.0.0 akismet/akismet.php)" = '"input"' ]       # ...and never for another plugin's file
   wpcli eval 'echo (int) apply_filters("auto_update_plugin", false, (object) ["plugin" => "puzzles-site-reports/puzzles-site-reports.php"]);' | grep -qx 1
   wpcli eval 'echo (int) apply_filters("auto_update_plugin", false, (object) ["plugin" => "akismet/akismet.php"]);' | grep -qx 0
-  # nothing is offered for a package outside the allowed prefix, a version that is not newer, or a body that is not a manifest
-  manifest 9.9.9 http://evil.example/test.zip; check; [ -z "$(offered)" ]
-  manifest 0.0.1 http://wp/test.zip; check; [ -z "$(offered)" ]
+
+  # nothing is offered unless the package is exactly this version's release asset, the version is X.Y.Z, and the body is a manifest
+  manifest 9.9.9 http://wp/releases/download/../../x/v9.9.9/puzzles-site-reports.zip; check; [ -z "$(offered)" ]
+  manifest 9.9.9 http://wp/releases/download/v9.9.8/puzzles-site-reports.zip; check; [ -z "$(offered)" ]
+  manifest 9.9.9 http://wp/other/v9.9.9/puzzles-site-reports.zip; check; [ -z "$(offered)" ]
+  manifest 9.9.9-beta http://wp/releases/download/v9.9.9-beta/puzzles-site-reports.zip; check; [ -z "$(offered)" ]
   wpcli eval 'file_put_contents( ABSPATH . "test-manifest.json", "not json" );'; check; [ -z "$(offered)" ]
-  wpcli eval 'unlink( WPMU_PLUGIN_DIR . "/psr-update.php" ); unlink( ABSPATH . "test.zip" ); unlink( ABSPATH . "test-manifest.json" );'
+  wpcli eval 'unlink( ABSPATH . "test-manifest.json" );'
 }
 
 # Fixed order (Task rulings). A new case is added to BOTH the function list and this one;

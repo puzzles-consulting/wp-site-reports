@@ -4,7 +4,7 @@ All notable changes to this plugin are documented here. Format: [Keep a Changelo
 
 ## [Unreleased]
 
-## [1.0.0]
+## [1.0.0] - 2026-11-18
 
 ### Added
 
