@@ -45,8 +45,9 @@ host that blocks wordpress.org never sees this plugin's update either; the porta
 ## Release
 
 ```bash
-bash scripts/build.sh <version>   # dist/puzzles-site-reports.zip
+bash scripts/build.sh <version>   # dist/puzzles-site-reports.zip, byte-reproducible
 bash tests/smoke.sh               # Docker smoke test against a throwaway WordPress
+bash tests/promote-dry-run.sh     # scripts/promote.sh against a throwaway origin and keys
 ```
 
 1. After `main`'s CI is green, tag `vX.Y.Z` (exactly three numbers) on it and push the tag.
@@ -54,22 +55,17 @@ bash tests/smoke.sh               # Docker smoke test against a throwaway WordPr
    zip alone as a **pre-release**. It has no manifest, so no site is offered it.
 2. Install it on the canary site with WP-CLI and check it there:
    `wp plugin install https://github.com/puzzles-consulting/wp-site-reports/releases/download/vX.Y.Z/puzzles-site-reports.zip --force`
-3. Sign and promote it, which rolls it out to every site on its next update check. On the owner's machine, from a
-   checkout of `main`, with the release key in `PUZZLES_SR_SIGNING_KEY` (from the secret store, never on disk):
+3. Sign and promote it, which rolls it out to every site on its next update check:
    `bash scripts/promote.sh vX.Y.Z <tested>`. Type `<tested>` yourself: it is the WordPress version the release notes
-   say the smoke test ran on (`Tested with WordPress 6.8.1`), and it becomes the manifest's `tested`. Never paste a
-   command from release notes: anyone with write access can edit them.
+   say the smoke test ran on (`Tested with WordPress 6.8.1`). Never paste a command from release notes: anyone with
+   write access can edit them. What the script checks before it signs, and every option, is in the header of
+   [`scripts/promote.sh`](scripts/promote.sh). In short: it builds the tag's raw tree with this checkout's own
+   [`scripts/build.sh`](scripts/build.sh) and signs only if the release's zip has exactly that sha256.
 
-   Before signing, `promote.sh` checks that the tag is the same commit locally and on GitHub and is on `main`, builds the
-   zip itself from that commit, and aborts unless the release's zip has exactly the same files and bytes. It signs the
-   sha256 of the release's zip only after that, and only with the key sites trust now (the one in the latest promoted
-   release; for the first release, the one in this zip). Then it uploads `manifest.json` and marks the release latest.
-   The key is read once and removed from the environment, and reaches PHP on stdin only (no `php` on PATH: a pinned
-   Docker image, with no container log).
-
-   `bash scripts/promote.sh vX.Y.Z <tested> --dry-run <zip>` runs the same checks with a local zip in place of the
-   release's and prints the manifest without touching GitHub. It refuses any key the plugin ever trusted: dry runs use a
-   throwaway key from `scripts/keygen.sh`.
+   Run it only on the owner's machine, from a checkout of `main` you have reviewed: it runs that checkout's scripts.
+   Give the release key (from the secret store, never on disk) to that one command only, as `PUZZLES_SR_SIGNING_KEY`
+   in its environment. The script unsets it before running anything, so none of its child processes inherits it, but
+   it cannot hide it from whatever started it or from anything else that environment reaches.
 
 The release key is created with `bash scripts/keygen.sh`: the public key goes into `PUZZLES_SR_UPDATE_PUBKEY`, the
 secret key goes from file descriptor 3 straight into the secret store (the script's header shows how).
@@ -79,8 +75,8 @@ old one.
 
 1. `bash scripts/keygen.sh` a new pair into the secret store (keep the old one), put the new public key in
    `PUZZLES_SR_UPDATE_PUBKEY`, and release it as `vX.Y.Z` as above.
-2. Promote it with the **old** key and `--rotate` (without it, `promote.sh` refuses a zip that changes the key):
-   `bash scripts/promote.sh vX.Y.Z <tested> --rotate`.
+2. Promote it with the **old** key in `PUZZLES_SR_SIGNING_KEY`, the **new** secret key in `PUZZLES_SR_NEW_SIGNING_KEY`
+   (the proof that it is yours) and `--rotate`: `bash scripts/promote.sh vX.Y.Z <tested> --rotate`.
 3. Promote the next release, with the new key, only once the portal shows every site on `X.Y.Z` or later: a site still
    on an older version accepts only the old key and would never reach `X.Y.Z` once a newer release is latest. Then
    retire the old key.

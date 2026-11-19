@@ -34,3 +34,15 @@ jobs:
           name: smoke-out
           path: tests/out/*.json
           if-no-files-found: ignore
+
+  promote-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # the test pushes HEAD, with its history, into a throwaway origin
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.3'
+      - run: bash tests/promote-dry-run.sh
