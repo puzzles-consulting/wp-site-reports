@@ -76,7 +76,7 @@ done
 curl -fs -o /dev/null http://localhost:8080/
 
 # Git Bash on Windows ships no jq: run it from an image (stdin, or files under out/).
-command -v jq >/dev/null || jq() { docker run -i --rm -e EXPECTED_VERSION -v "$(pwd -W 2>/dev/null || pwd)/out:/w/out" -w /w ghcr.io/jqlang/jq:1.7.1 "$@"; }
+command -v jq >/dev/null || jq() { docker run -i --rm -e EXPECTED_VERSION -v "$(pwd -W 2>/dev/null || pwd)/out:/w/out" -w /w ghcr.io/jqlang/jq@sha256:096b83865ad59b5b02841f103f83f45c51318394331bf1995e187ea3be937432 "$@"; } # jq:1.7.1
 
 base64url_decode() { # stdin -> stdout; re-pads and maps -_ to +/
   local s; s=$(tr -d '\r\n' | tr '_-' '/+')

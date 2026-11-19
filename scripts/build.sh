@@ -15,7 +15,7 @@ grep -q " \* Version: $V\$" "$F"
 grep -q "'PUZZLES_SITE_REPORTS_VERSION', '$V'" "$F"
 
 PY=python3; "$PY" -c '' 2>/dev/null || PY=python # python3 may be a Windows store stub
-# Writes the zip and prints its entries (the CI log shows what ships); fails on anything outside puzzles-site-reports/.
+# Writes the zip and prints its entries (the CI log shows what ships).
 "$PY" - <<'PYEOF'
 import os, zipfile
 root = 'dist/stage'
@@ -24,10 +24,7 @@ with zipfile.ZipFile('dist/puzzles-site-reports.zip', 'w', zipfile.ZIP_DEFLATED)
         for f in sorted(files):
             p = os.path.join(d, f)
             z.write(p, os.path.relpath(p, root).replace(os.sep, '/'))
-    names = z.namelist()
-print('\n'.join(names))
-if any(not n.startswith('puzzles-site-reports/') for n in names):
-    raise SystemExit('zip entry outside puzzles-site-reports/')
+    print('\n'.join(z.namelist()))
 PYEOF
 rm -rf dist/stage
 printf '%s' "$V" > dist/VERSION

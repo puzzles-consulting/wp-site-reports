@@ -40,10 +40,12 @@ jobs:
       - run: bash tests/smoke.sh
       - name: Pre-release the zip only
         run: |
+          [ -s tests/out/wp-version.txt ] || { echo "tests/out/wp-version.txt is missing or empty" >&2; exit 1; }
           WP="$(cat tests/out/wp-version.txt)"
-          [ -n "$WP" ] || { echo "tests/out/wp-version.txt is missing or empty" >&2; exit 1; }
+          [[ "$WP" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "bad WordPress version: $WP" >&2; exit 1; }
+          # Data only, never a command: the owner types `tested` into scripts/promote.sh (README, Release).
           gh release create "$TAG" dist/puzzles-site-reports.zip --prerelease --generate-notes \
-            --notes "Smoke-tested on WordPress $WP: promote with \`scripts/promote.sh $TAG $WP\`."
+            --notes "Tested with WordPress $WP"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}

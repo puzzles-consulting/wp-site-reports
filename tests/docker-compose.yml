@@ -1,8 +1,9 @@
 # Throwaway WordPress stack for tests/smoke.sh. Never left running: the script tears it down with `down -v`.
+# Images are pinned by digest (tag in the comment): a new WordPress, and so a new `tested`, is a deliberate bump.
 name: puzzles-site-reports-smoke # fixed, so `down -v` can never touch another project's stack
 services:
   db:
-    image: mariadb:11
+    image: mariadb@sha256:d36f18d65a0459510b8b0f643b226a6d299e3206486e2b64ff20754a6d291707 # mariadb:11
     environment:
       MARIADB_DATABASE: wp
       MARIADB_USER: wp
@@ -14,7 +15,7 @@ services:
       timeout: 3s
       retries: 30
   wp:
-    image: wordpress:php8.3-apache
+    image: wordpress@sha256:15195799455c0440e34e4890478c0f1af26350ce166df93a402c1affb4fa0695 # wordpress:php8.3-apache
     depends_on:
       db:
         condition: service_healthy
@@ -28,7 +29,7 @@ services:
     volumes:
       - wpdata:/var/www/html
   cli:
-    image: wordpress:cli-php8.3
+    image: wordpress@sha256:e4980e3ef763ce7535049c05a54e906d95b16370f28ca02fa329a079eebf3f65 # wordpress:cli-php8.3
     user: "33:33" # www-data of the wp image, so both containers own the same files
     profiles: ["cli"]
     depends_on:
