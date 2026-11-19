@@ -1,6 +1,6 @@
 name: Release
-# A `vX.Y.Z` tag: PHP lint on 7.4 to 8.4, build, smoke on that exact zip, then a PRE-release of the zip alone (no manifest:
-# no site sees it until the owner signs and promotes it with the promoter, README > Release).
+# A `vX.Y.Z` tag on main (CI has linted it): build, smoke on that exact zip, then a PRE-release of the zip alone. This
+# workflow only ever makes pre-releases: no site sees one until the owner signs and promotes it (README, Release).
 on:
   push:
     tags: ['v*']
@@ -9,22 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        php: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4']
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
-        with:
-          php-version: ${{ matrix.php }}
-      - run: find . -name '*.php' -not -path './tests/*' -print0 | xargs -0 -n1 php -l
-
   release:
-    needs: lint
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -36,7 +21,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      # The plain build, no --test-overrides: the promoter (scripts/wp-sr-promote) rebuilds the tag and requires this zip's exact sha256.
+      # The plain build, no --test-overrides: the zip the owner reviews and signs (scripts/wp-sr-promote).
       - run: bash scripts/build.sh "${TAG#v}"
       - run: bash tests/smoke.sh
       - name: Pre-release the zip only
