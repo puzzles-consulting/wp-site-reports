@@ -13,4 +13,6 @@ All notable changes to this plugin are documented here. Format: [Keep a Changelo
 - `GET /seo`: Rank Math focus keywords, scores, titles, descriptions and noindex of each published page and post.
 - A token connection from Tools > Site Reports or `wp puzzles-site-reports connect`, stored only as its SHA-256 hash.
 - Signed self-update from this repository's GitHub Releases, installed only when the download matches the SHA-256 that
-  the release key (never in GitHub) signed.
+  the release key (never in GitHub) signed. The download is capped at 5 MB and 60 seconds.
+- Wordfence messages in `/status` carry no server path: absolute paths and every URL but an http(s) one are dropped (an
+  http(s) URL keeps its scheme and host).

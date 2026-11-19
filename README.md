@@ -56,16 +56,18 @@ bash tests/promote-dry-run.sh     # scripts/promote.sh against a throwaway origi
 2. Install it on the canary site with WP-CLI and check it there:
    `wp plugin install https://github.com/puzzles-consulting/wp-site-reports/releases/download/vX.Y.Z/puzzles-site-reports.zip --force`
 3. Sign and promote it, which rolls it out to every site on its next update check:
-   `bash scripts/promote.sh vX.Y.Z <tested>`. Type `<tested>` yourself: it is the WordPress version the release notes
-   say the smoke test ran on (`Tested with WordPress 6.8.1`). Never paste a command from release notes: anyone with
-   write access can edit them. What the script checks before it signs, every option and how it handles the key are in
-   the header of [`scripts/promote.sh`](scripts/promote.sh).
+   `bash scripts/promote.sh vX.Y.Z <tested>`, on the owner's machine, from a clean checkout of `main`, with the release
+   key from the secret store in that one command's environment. Type `<tested>` yourself (the release notes say
+   `Tested with WordPress 6.8.1`); never paste a command from release notes. Your review is the control: before the
+   script sources or runs anything from the checkout or uses the key, it prints two diffs against your last promotion
+   recorded on this machine, (1) the scripts about to run (`scripts/`, `.gitattributes`) and (2) every file the release
+   ships, in full, and asks you to type the version. Review both. The record is a local ref,
+   `refs/puzzles-sr/promoted/vX.Y.Z`, that only the script writes: it stays local (never push it), and a machine
+   without one shows everything as new. The canary is a functional check, not a review. The checks, the options and
+   how the key is handled are in the header of [`scripts/promote.sh`](scripts/promote.sh).
 
-   Run it only on the owner's machine, from a clean checkout of `main` you have reviewed (it runs that checkout's
-   scripts, and the tag must be in its history), with the release key from the secret store in that one command's
-   environment. Before it signs, it prints what the release ships against the latest promoted one (the full diff of the
-   main file, which holds the update code and the key) and asks you to type the version: review that diff first. The
-   canary is a functional check, not a review.
+Branch protection on `main` and restricting who can create `v*` tags on GitHub are still recommended: they are
+repository settings, the owner's decision.
 
 The release key is created with `bash scripts/keygen.sh`: the public key goes into `PUZZLES_SR_UPDATE_PUBKEY`, the
 secret key goes from file descriptor 3 straight into the secret store (the script's header shows how).

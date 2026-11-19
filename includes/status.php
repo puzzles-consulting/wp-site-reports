@@ -26,9 +26,10 @@ function puzzles_sr_updates_checked_at( array $transients ): ?string {
 }
 
 /**
- * $s without absolute server paths: the content dir becomes "wp-content", the install root and its parent disappear,
- * then any other absolute path. A root counts only at a path boundary (followed by a separator or where the path ends),
- * so "/var/www" never eats the start of "/var/wwwdata/x".
+ * $s without server paths: the content dir becomes "wp-content", the install root and its parent disappear (a root
+ * counts only at a path boundary: followed by a separator or where the path ends). Then any other absolute path (Unix,
+ * or Windows with a drive or a UNC prefix) not preceded by a letter or a digit goes, and every URL goes whole except an
+ * http(s) one, which keeps its scheme and host (group 1) and loses a path only where it starts after a non-alphanumeric.
  */
 function puzzles_sr_scrub_paths( string $s ): string {
 	$s = (string) preg_replace( '~' . preg_quote( WP_CONTENT_DIR, '~' ) . '(?=[/\\\\\s"\'<>:;,)\]]|\z)~', 'wp-content', $s );
@@ -37,10 +38,6 @@ function puzzles_sr_scrub_paths( string $s ): string {
 			$s = (string) preg_replace( '~' . preg_quote( $root, '~' ) . '(?:[/\\\\]|(?=[\s"\'<>:;,)\]]|\z))~', '', $s );
 		}
 	}
-	// What is left goes: a Unix (/a/b) or Windows (C:\a, \\host\a) absolute path not preceded by a letter or a digit
-	// (open_basedir:/x, include_path=.:/x, =>/x, -/x, .~/x; wp-content/x stays), and any URL whole (file:///x) except an
-	// http(s) one, whose scheme and host are kept (group 1); a path after its host stays unless it starts after a
-	// non-alphanumeric (https://h/a stays, https://h/?q=/x loses /x).
 	return (string) preg_replace( '~((?i:https?)://[^\s"\'<>/\\\\]*)|(?<![A-Za-z0-9])(?:[A-Za-z][A-Za-z0-9+.-]*:(?=//))?(?:[A-Za-z]:)?[\\\\/][^\s"\'<>]+~', '$1', $s );
 }
 
