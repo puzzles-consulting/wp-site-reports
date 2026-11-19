@@ -216,11 +216,12 @@ Version: 1.2.3
   ! grep -q 'PSR-long-marker' out/status.json || return 1               # shortMsg, never longMsg
   ! grep -q 'private-data' out/status.json || return 1                  # Wordfence's per-issue data never leaves
   ! grep -qE '/var/www|passwd|inetpub' out/status.json || return 1      # no server path anywhere
-  # shortMsg's path scrub itself: paths after ":", "=.:", "=>" or a tag go, a root only matches at a path boundary
-  # (ABSPATH is /var/www/html/), URLs and relative paths stay
+  # shortMsg's path scrub itself (the edge cases are in puzzles_sr_scrub_paths' comment; ABSPATH is /var/www/html/)
   short() { wpcli eval "echo puzzles_sr_short_msg( base64_decode( '$(printf '%s' "$1" | base64 | tr -d '\n')' ) );" | tr -d '\r\n'; }
   o=$(short 'A open_basedir:/home/x/secret B include_path=.:/usr/share/php C /var/wwwdata/x D https://example.com/a E wp-content/x.php')
   [ "$o" = "A open_basedir: B include_path=.: C  D https://example.com/a E wp-content/x.php" ]
+  o=$(short 'F file:///home/u/x G -/home/u/x H .~/x I http://h.example/p?q=/etc/x')
+  [ "$o" = "F  G - H .~ I http://h.example/p?q=" ]
   o=$(short 'Found<code>/etc/passwd</code>'); [ "$o" = Found ]
   o=$(short 'Found<code>/var/wwwdata/x</code>'); [ "$o" = Found ]
   o=$(short '=>/opt/x/y'); [ "$o" = '=>' ]
@@ -369,11 +370,10 @@ case_update_offer() { # manifests signed by this run's throwaway key, served by 
   manifest 9.9.9 "$sha" "$kp2"; not_offered                                                 # signed by another key
   manifest 9.9.9 "$sha" "$KP" "'version' => '9.9.10'"; not_offered                         # signed for another version
   manifest 9.9.9 "$sha" "$KP" "'tested' => '6.10'"; not_offered                            # a signed field changed after signing
-  manifest 9.9.9 "$sha" "$KP" "'requires_php' => '5.6'"; not_offered                       # another one
   manifest 9.9.9 "$sha" "$KP" "'requires' => null"; not_offered                            # a signed field missing
   manifest 9.9.9 "$sha" "$KP" "" "'tested' => 'latest'"; not_offered                       # signed, but not a version
-  manifest 9.9.9 "$sha" "$KP" "" "'requires' => '5.x'"; not_offered                        # another one
-  manifest 9.9.9 "$sha" "$KP" "" "'requires_php' => '7'"; not_offered                      # and another
+  manifest 9.9.9 "$sha" "$KP" "" "'requires' => '5.x'"; not_offered                        # signed, a malformed version
+  manifest 9.9.9 "$sha" "$KP" "" "'requires_php' => '7'"; not_offered                      # signed, a shorthand (X.Y at least)
   manifest 9.9.9-beta "$sha"; not_offered                                                   # not X.Y.Z, though signed
   manifest 9.9.9 "$(tr a-f A-F <<<"$sha")"; not_offered                                     # not lowercase hex, though signed
   wpcli eval 'file_put_contents( ABSPATH . "test-manifest.json", "not json" );'; not_offered

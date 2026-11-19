@@ -35,8 +35,8 @@ Ed25519 signature by the release key of the five other fields joined by one newl
 public key it carries (`PUZZLES_SR_UPDATE_PUBKEY`). The release key never lives in GitHub, so write access to the
 repository alone cannot ship anything. `version` must be `X.Y.Z`, `sha256` lowercase hex, and the other three `X.Y` or
 `X.Y.Z`; anything else is ignored. The offer's package is `puzzles-sr://X.Y.Z/<sha256>`, which WordPress cannot fetch
-by itself: the plugin's download step turns it into `.../releases/download/vX.Y.Z/puzzles-site-reports.zip`, reads at
-most 5 MB of it, and installs the download only if it hashes to `sha256`. If that step is not loaded, the update fails
+by itself: the plugin's download step turns it into `.../releases/download/vX.Y.Z/puzzles-site-reports.zip`, stores at
+most 5 MB of it (within 60 seconds), and installs the download only if it hashes to `sha256`. If that step is not loaded, the update fails
 instead of installing an unchecked zip. No filter can change the key or the URLs.
 
 WordPress applies offers for an `Update URI` plugin only after its own check against api.wordpress.org succeeds. A

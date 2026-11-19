@@ -269,7 +269,7 @@ function puzzles_sr_pre_download( $reply, $package, $upgrader = null, $hook_extr
 	$res  = wp_safe_remote_get(
 		PUZZLES_SITE_REPORTS_PACKAGE_PREFIX . 'v' . $p[1] . '/puzzles-site-reports.zip',
 		array(
-			'timeout'             => 300,
+			'timeout'             => 60, // a hostile, slow asset cannot hold the update longer
 			'stream'              => true,
 			'filename'            => $file,
 			'limit_response_size' => PUZZLES_SITE_REPORTS_MAX_PACKAGE,
