@@ -9,12 +9,12 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 /** ISO 8601 UTC ("Z") of a unix time, or null when there is none. */
-function psr_iso( $ts ): ?string {
+function puzzles_sr_iso( $ts ): ?string {
 	return is_numeric( $ts ) && $ts > 0 ? gmdate( 'Y-m-d\TH:i:s\Z', (int) $ts ) : null;
 }
 
 /** The oldest last_checked of the three update transients; null if any never ran. */
-function psr_updates_checked_at( array $transients ): ?string {
+function puzzles_sr_updates_checked_at( array $transients ): ?string {
 	$oldest = null;
 	foreach ( $transients as $t ) {
 		if ( ! is_object( $t ) || empty( $t->last_checked ) ) {
@@ -22,18 +22,18 @@ function psr_updates_checked_at( array $transients ): ?string {
 		}
 		$oldest = null === $oldest ? (int) $t->last_checked : min( $oldest, (int) $t->last_checked );
 	}
-	return psr_iso( $oldest );
+	return puzzles_sr_iso( $oldest );
 }
 
 /** Wordfence's own open issues, ignored count and last scan; null when it is not installed. Never starts a scan. */
-function psr_wordfence( array $plugins ): ?array {
+function puzzles_sr_wordfence( array $plugins ): ?array {
 	$file = 'wordfence/wordfence.php';
 	if ( ! isset( $plugins[ $file ] ) ) {
 		return null;
 	}
 	$out = array(
 		'version'    => (string) $plugins[ $file ]['Version'],
-		'active'     => psr_plugin_active( $file ),
+		'active'     => puzzles_sr_plugin_active( $file ),
 		'lastScanAt' => null,
 		'issues'     => array(),
 		'ignored'    => 0,
@@ -42,7 +42,7 @@ function psr_wordfence( array $plugins ): ?array {
 	// are used instead of its tables. getIssues() hydrates each issue (including its per-issue `data`): only four fields leave here.
 	if ( $out['active'] && class_exists( 'wfIssues' ) && class_exists( 'wfScanner' ) ) {
 		try {
-			$out['lastScanAt'] = psr_iso( wfScanner::shared()->lastScanTime() );
+			$out['lastScanAt'] = puzzles_sr_iso( wfScanner::shared()->lastScanTime() );
 			$issues            = new wfIssues();
 			$found             = $issues->getIssues( 0, 200, 0, 0 );
 			foreach ( isset( $found['new'] ) ? (array) $found['new'] : array() as $i ) {
@@ -53,8 +53,8 @@ function psr_wordfence( array $plugins ): ?array {
 					'type'        => (string) $i['type'],
 					'severity'    => (int) $i['severity'], // Wordfence's own: 100 critical, 75 high, 50 medium, 25 low
 					// No absolute server path leaves: the content dir becomes "wp-content", the install root disappears (before the cut). Plain text first, like /seo.
-					'shortMsg'    => mb_substr( str_replace( array( WP_CONTENT_DIR, ABSPATH ), array( 'wp-content', '' ), (string) psr_plain( $i['shortMsg'] ) ), 0, 300 ),
-					'firstSeenAt' => psr_iso( isset( $i['time'] ) ? $i['time'] : null ),
+					'shortMsg'    => mb_substr( str_replace( array( WP_CONTENT_DIR, ABSPATH ), array( 'wp-content', '' ), (string) puzzles_sr_plain( $i['shortMsg'] ) ), 0, 300 ),
+					'firstSeenAt' => puzzles_sr_iso( isset( $i['time'] ) ? $i['time'] : null ),
 				);
 			}
 			$counts         = $issues->getIssueCounts();
@@ -66,11 +66,11 @@ function psr_wordfence( array $plugins ): ?array {
 	return $out;
 }
 
-function psr_plugin_active( string $file ): bool {
+function puzzles_sr_plugin_active( string $file ): bool {
 	return is_plugin_active( $file ) || is_plugin_active_for_network( $file );
 }
 
-function psr_status(): array {
+function puzzles_sr_status(): array {
 	require_once ABSPATH . 'wp-admin/includes/plugin.php'; // REST requests do not load it
 
 	$core_t    = get_site_transient( 'update_core' );
@@ -99,7 +99,7 @@ function psr_status(): array {
 			'file'       => (string) $file,
 			'name'       => (string) $p['Name'],
 			'version'    => (string) $p['Version'],
-			'active'     => psr_plugin_active( $file ),
+			'active'     => puzzles_sr_plugin_active( $file ),
 			'update'     => $offer,
 			'autoUpdate' => in_array( $file, $auto, true ),
 		);
@@ -136,13 +136,13 @@ function psr_status(): array {
 		'wordpress'  => array(
 			'version'          => get_bloginfo( 'version' ),
 			'update'           => $core_update,
-			'updatesCheckedAt' => psr_updates_checked_at( array( $core_t, $plugins_t, $themes_t ) ),
+			'updatesCheckedAt' => puzzles_sr_updates_checked_at( array( $core_t, $plugins_t, $themes_t ) ),
 		),
 		'php'        => array( 'version' => PHP_VERSION ),
 		'plugins'    => $list,
 		'mustUse'    => $mu,
 		'themes'     => $themes,
-		'wordfence'  => psr_wordfence( $all ),
+		'wordfence'  => puzzles_sr_wordfence( $all ),
 		'comments'   => array( 'defaultStatus' => (string) get_option( 'default_comment_status' ) ),
 	);
 }

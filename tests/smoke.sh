@@ -198,7 +198,7 @@ case_seo_with_rank_math() {
     update_post_meta( $id, "_elementor_data", str_repeat( "x", 200000 ) );
     update_post_meta( $id, "psr_seed", 1 );
   }'
-  mem=$(wpcli eval '$b = memory_get_usage(); psr_seo(); echo memory_get_peak_usage() - $b;' | tr -d '\r\n')
+  mem=$(wpcli eval '$b = memory_get_usage(); puzzles_sr_seo(); echo memory_get_peak_usage() - $b;' | tr -d '\r\n')
   echo "seo peak memory over baseline: $mem bytes"
   [ "$mem" -lt 33554432 ] # under 32 MB; loading the seeded meta alone would be ~60 MB
 
@@ -228,7 +228,7 @@ case_update_offer() { # a local manifest (served by the wp container, reached as
   check() { wpcli transient delete update_plugins --network; wpcli eval 'wp_update_plugins();'; }
   offered() { wpcli plugin list --name=puzzles-site-reports --field=update_version | tr -d '\r\n'; }
   filter() { # filter <installed-version> <plugin-file>: our update filter called directly; "input" is what core handed in
-    wpcli eval "echo wp_json_encode( psr_update_offer( 'input', array( 'Version' => '$1' ), '$2', array() ) );" | tr -d '\r\n'
+    wpcli eval "echo wp_json_encode( puzzles_sr_update_offer( 'input', array( 'Version' => '$1' ), '$2', array() ) );" | tr -d '\r\n'
   }
 
   # no manifest file yet (the setup mu-plugin points at it; WordPress answers its 404): nothing is offered, the input comes back
