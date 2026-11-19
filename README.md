@@ -31,11 +31,14 @@ resolves to the newest release that is **not** a pre-release. It runs only insid
 admin), never on a front-end request, and any failure leaves WordPress' own answer untouched.
 
 Updates are signed. The manifest is `{ version, sha256, requires, requires_php, tested, signature }`: `signature` is an
-Ed25519 signature of the exact bytes `<version>\n<sha256>` (one newline between) by the release key, which the plugin
-checks against the public key it carries (`PUZZLES_SR_UPDATE_PUBKEY`). The release key never lives in GitHub, so write access to the repository alone cannot
-ship anything. `version` must be `X.Y.Z` and `sha256` lowercase hex; the package URL is derived from the version
-(`.../releases/download/vX.Y.Z/puzzles-site-reports.zip`), and the download is installed only if it hashes to `sha256`.
-Anything else is ignored.
+Ed25519 signature by the release key of the five other fields joined by one newline each, in that order
+(`<version>\n<sha256>\n<requires>\n<requires_php>\n<tested>`, no trailing newline). The plugin checks it against the
+public key it carries (`PUZZLES_SR_UPDATE_PUBKEY`). The release key never lives in GitHub, so write access to the
+repository alone cannot ship anything. `version` must be `X.Y.Z`, `sha256` lowercase hex, and the other three `X.Y` or
+`X.Y.Z`; anything else is ignored. The offer's package is `puzzles-sr://X.Y.Z/<sha256>`, which WordPress cannot fetch
+by itself: the plugin's download step turns it into `.../releases/download/vX.Y.Z/puzzles-site-reports.zip` and installs
+the download only if it hashes to `sha256`. If that step is not loaded, the update fails instead of installing an
+unchecked zip.
 
 WordPress applies offers for an `Update URI` plugin only after its own check against api.wordpress.org succeeds. A
 host that blocks wordpress.org never sees this plugin's update either; the portal's version-lag column shows it.

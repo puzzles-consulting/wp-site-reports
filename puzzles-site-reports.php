@@ -166,12 +166,13 @@ add_action(
 // ---- Self-update from GitHub Releases, signed ----
 // Core runs the offer only inside its own update check (cron or admin), never on a front-end request, and caches the
 // answer in the update_plugins transient, so nothing is cached here. Any failure leaves WordPress' answer untouched.
-// A manifest counts only when its Ed25519 signature verifies with the key below. The signing key never lives in GitHub
-// (README, Release): write access to the repository alone cannot ship a zip to the sites.
+// A manifest counts only when its Ed25519 signature over all its fields verifies with the key below, and the package is
+// installed only when it hashes to the signed sha256. The signing key never lives in GitHub (README, Release): write
+// access to the repository alone cannot ship a zip to the sites.
 define( 'PUZZLES_SITE_REPORTS_MANIFEST_URL', 'https://github.com/puzzles-consulting/wp-site-reports/releases/latest/download/manifest.json' );
 define( 'PUZZLES_SITE_REPORTS_PACKAGE_PREFIX', 'https://github.com/puzzles-consulting/wp-site-reports/releases/download/' );
 // Base64 Ed25519 public key of the release signing key (created 2026-11-19; the secret key is held outside GitHub).
-// A new key means a release that ships the new public key, signed with the old one.
+// A new key means a release that ships the new public key, signed with the old one (README, Release).
 define( 'PUZZLES_SR_UPDATE_PUBKEY', 'x+RJSe516KyRf6lm8ooy1VgB3on7C/zYDjvYEoPgBBQ=' );
 
 /** The release asset of a version. The prefix filter is test-only (the smoke serves its own releases). */
@@ -179,12 +180,28 @@ function puzzles_sr_package_url( string $version ): string {
 	return (string) apply_filters( 'puzzles_site_reports_package_prefix', PUZZLES_SITE_REPORTS_PACKAGE_PREFIX ) . 'v' . $version . '/puzzles-site-reports.zip';
 }
 
-/** The manifest when it holds version X.Y.Z, a lowercase hex sha256 and a signature that verifies, else null. */
+/**
+ * The manifest when every signed field is well formed and the signature verifies, else null. The signed message is the
+ * fields below joined by "\n", in this order (scripts/promote.sh builds the same string).
+ */
 function puzzles_sr_verified_manifest( string $body ): ?array {
 	$m = json_decode( $body, true );
-	if ( ! is_array( $m ) || ! is_string( $m['version'] ?? null ) || ! is_string( $m['sha256'] ?? null ) || ! is_string( $m['signature'] ?? null )
-		|| ! preg_match( '/^\d+\.\d+\.\d+\z/', $m['version'] ) || ! preg_match( '/^[0-9a-f]{64}\z/', $m['sha256'] ) ) {
+	if ( ! is_array( $m ) || ! is_string( $m['signature'] ?? null ) ) {
 		return null;
+	}
+	$formats = array(
+		'version'      => '/^\d+\.\d+\.\d+\z/',
+		'sha256'       => '/^[0-9a-f]{64}\z/',
+		'requires'     => '/^\d+\.\d+(\.\d+)?\z/',
+		'requires_php' => '/^\d+\.\d+(\.\d+)?\z/',
+		'tested'       => '/^\d+\.\d+(\.\d+)?\z/',
+	);
+	$signed = array();
+	foreach ( $formats as $field => $re ) {
+		if ( ! is_string( $m[ $field ] ?? null ) || ! preg_match( $re, $m[ $field ] ) ) {
+			return null;
+		}
+		$signed[] = $m[ $field ];
 	}
 	// The key filter is test-only (the smoke signs with a throwaway key). Wrong lengths are refused before sodium:
 	// sodium_compat (WordPress' fallback when ext-sodium is missing) throws on them.
@@ -194,7 +211,7 @@ function puzzles_sr_verified_manifest( string $body ): ?array {
 		return null;
 	}
 	try {
-		return sodium_crypto_sign_verify_detached( $sig, $m['version'] . "\n" . $m['sha256'], $key ) ? $m : null;
+		return sodium_crypto_sign_verify_detached( $sig, implode( "\n", $signed ), $key ) ? $m : null;
 	} catch ( Throwable $e ) {
 		return null;
 	}
@@ -214,42 +231,41 @@ function puzzles_sr_update_offer( $update, $plugin_data, $plugin_file ) {
 	if ( ! $m || ! version_compare( $m['version'], (string) $plugin_data['Version'], '>' ) ) {
 		return $update;
 	}
-	$opt = function ( $k ) use ( $m ) {
-		return is_string( $m[ $k ] ?? null ) ? $m[ $k ] : '';
-	};
 	return array(
 		'slug'         => 'puzzles-site-reports',
 		'version'      => $m['version'],
-		'package'      => puzzles_sr_package_url( $m['version'] ), // derived from the signed version, never read from the manifest
-		'sha256'       => $m['sha256'], // core keeps this extra key in the update_plugins transient: the download step checks it
-		'requires'     => $opt( 'requires' ),
-		'requires_php' => $opt( 'requires_php' ),
-		'tested'       => $opt( 'tested' ),
+		// Not a URL core can fetch: only puzzles_sr_pre_download() turns it into the download, checked against the signed
+		// sha256 it carries. Without that hook (plugin inactive, the offer installed from elsewhere) the update fails closed.
+		'package'      => 'puzzles-sr://' . $m['version'] . '/' . $m['sha256'],
+		'requires'     => $m['requires'],
+		'requires_php' => $m['requires_php'],
+		'tested'       => $m['tested'],
 		'url'          => 'https://github.com/puzzles-consulting/wp-site-reports',
 	);
 }
 add_filter( 'update_plugins_github.com', 'puzzles_sr_update_offer', 10, 3 );
 
-/** Core's download step. For the package of this plugin's pending offer, the zip must hash to the signed sha256; any other package is left to core. */
-function puzzles_sr_pre_download( $reply, $package ) {
-	$t     = get_site_transient( 'update_plugins' );
-	$offer = $t->response[ plugin_basename( __FILE__ ) ] ?? null;
-	if ( ! is_object( $offer ) || ! is_string( $offer->new_version ?? null ) || $package !== puzzles_sr_package_url( $offer->new_version ) ) {
+/** Core's download step for this plugin's sentinel package: the release zip, returned only if it hashes to the signed sha256. Any other package is left to core. */
+function puzzles_sr_pre_download( $reply, $package, $upgrader = null, $hook_extra = array() ) {
+	if ( is_wp_error( $reply ) || ! is_string( $package ) || 0 !== strpos( $package, 'puzzles-sr://' )
+		|| ( isset( $hook_extra['plugin'] ) && plugin_basename( __FILE__ ) !== $hook_extra['plugin'] ) ) {
 		return $reply;
 	}
+	if ( ! preg_match( '~^puzzles-sr://(\d+\.\d+\.\d+)/([0-9a-f]{64})\z~', $package, $p ) ) {
+		return new WP_Error( 'puzzles_sr_bad_package', 'The update package does not match its signed manifest.' );
+	}
 	require_once ABSPATH . 'wp-admin/includes/file.php';
-	$file = download_url( $package );
+	$file = download_url( puzzles_sr_package_url( $p[1] ) );
 	if ( is_wp_error( $file ) ) {
 		return $file;
 	}
-	$sha = $offer->sha256 ?? null;
-	if ( ! is_string( $sha ) || ! hash_equals( $sha, (string) hash_file( 'sha256', $file ) ) ) {
+	if ( ! hash_equals( $p[2], (string) hash_file( 'sha256', $file ) ) ) {
 		wp_delete_file( $file );
 		return new WP_Error( 'puzzles_sr_bad_package', 'The update package does not match its signed manifest.' );
 	}
 	return $file;
 }
-add_filter( 'upgrader_pre_download', 'puzzles_sr_pre_download', 10, 2 );
+add_filter( 'upgrader_pre_download', 'puzzles_sr_pre_download', 10, 4 );
 
 // Sites install this plugin's updates themselves; every other plugin keeps whatever core decided.
 add_filter(
