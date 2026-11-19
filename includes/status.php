@@ -52,8 +52,9 @@ function psr_wordfence( array $plugins ): ?array {
 				$out['issues'][] = array(
 					'type'        => (string) $i['type'],
 					'severity'    => (int) $i['severity'], // Wordfence's own: 100 critical, 75 high, 50 medium, 25 low
-					'shortMsg'    => mb_substr( (string) $i['shortMsg'], 0, 300 ),
-					'firstSeenAt' => psr_iso( $i['time'] ),
+					// No absolute server path leaves: the content dir becomes "wp-content", the install root disappears (before the cut).
+					'shortMsg'    => mb_substr( str_replace( array( WP_CONTENT_DIR, ABSPATH ), array( 'wp-content', '' ), (string) $i['shortMsg'] ), 0, 300 ),
+					'firstSeenAt' => psr_iso( isset( $i['time'] ) ? $i['time'] : null ),
 				);
 			}
 			$counts         = $issues->getIssueCounts();
@@ -78,9 +79,14 @@ function psr_status(): array {
 
 	$core_update = null;
 	if ( is_object( $core_t ) && ! empty( $core_t->updates ) && is_array( $core_t->updates ) ) {
-		$first = $core_t->updates[0];
-		if ( is_object( $first ) && isset( $first->response ) && 'upgrade' === $first->response ) {
-			$core_update = (string) ( isset( $first->current ) ? $first->current : $first->version );
+		foreach ( $core_t->updates as $offer ) { // the first real upgrade offer, wherever it sits in the list
+			if ( is_object( $offer ) && isset( $offer->response ) && 'upgrade' === $offer->response ) {
+				$version = isset( $offer->current ) ? $offer->current : ( isset( $offer->version ) ? $offer->version : null );
+				if ( is_string( $version ) && '' !== $version ) {
+					$core_update = $version;
+					break;
+				}
+			}
 		}
 	}
 
@@ -111,7 +117,9 @@ function psr_status(): array {
 	$themes = array();
 	$active = get_stylesheet();
 	foreach ( wp_get_themes() as $stylesheet => $t ) {
-		$offer    = is_object( $themes_t ) && isset( $themes_t->response[ $stylesheet ]['new_version'] ) ? (string) $themes_t->response[ $stylesheet ]['new_version'] : null;
+		$entry    = is_object( $themes_t ) && isset( $themes_t->response[ $stylesheet ] ) ? $themes_t->response[ $stylesheet ] : null;
+		$entry    = is_object( $entry ) ? (array) $entry : $entry; // core stores arrays, a third-party updater may store objects
+		$offer    = is_array( $entry ) && isset( $entry['new_version'] ) && is_scalar( $entry['new_version'] ) ? (string) $entry['new_version'] : null;
 		$template = $t->get_template();
 		$themes[] = array(
 			'stylesheet' => (string) $stylesheet,

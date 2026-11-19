@@ -106,32 +106,56 @@ case_status_wordfence_and_updates() {
   wpcli plugin install wordfence --activate
   wpcli plugin install akismet --version=5.0 --force
   wpcli plugin deactivate akismet || true
+  wpcli plugin auto-updates enable akismet
   wpcli theme install twentytwentyone --version=1.0 --force
+  # a child theme (parent), and a must-use plugin (exactly file/name/version)
+  wpcli eval '
+    $d = get_theme_root() . "/psr-child"; wp_mkdir_p( $d );
+    file_put_contents( $d . "/style.css", "/*\nTheme Name: PSR Child\nTemplate: twentytwentyone\nVersion: 0.1\n*/" );
+    file_put_contents( $d . "/index.php", "<?php // Silence is golden." );
+    wp_mkdir_p( WPMU_PLUGIN_DIR );
+    file_put_contents( WPMU_PLUGIN_DIR . "/psr-test-mu.php", "<?php\n/*\nPlugin Name: PSR Test MU\nVersion: 1.2.3\n*/" );'
   for t in update_core update_plugins update_themes; do wpcli transient delete "$t" --network >/dev/null 2>&1 || true; done
   wpcli eval 'wp_update_plugins(); wp_update_themes(); wp_version_check();'
   wpcli option update default_comment_status closed
   # No scan is run (too heavy): seed Wordfence's own store through its public API instead, so the reading path runs for real.
-  # Issue 1 is open (long message, a path in its private data; Wordfence itself keeps shortMsg to 255), issue 2 is ignored.
+  # Issue 1 is open: a distinctive shortMsg that holds a server path (it must come back relative), a different longMsg,
+  # a path in its private data. Issue 2 is ignored (its id is looked up, not assumed).
   wpcli eval '
+    global $wpdb;
     $i = wfIssues::shared();
-    $i->addIssue( "wfPluginUpgrade", 75, "a", "a", str_repeat( "m", 400 ), "long", array( "secret" => "/var/www/html/private-data" ) );
+    $i->addIssue( "wfPluginUpgrade", 75, "a", "a", "PSR-short-marker in " . WP_CONTENT_DIR . "/plugins/x.php", "PSR-long-marker", array( "secret" => "/var/www/html/private-data" ) );
     $i->addIssue( "wfThemeUpgrade", 50, "b", "b", "ignored one", "long", array() );
-    $i->updateIssue( 2, "ignoreP" );
+    $id = (int) $wpdb->get_var( "SELECT id FROM " . $i->getIssuesTable() . " WHERE type = \"wfThemeUpgrade\"" );
+    if ( ! $id ) { exit( 1 ); }
+    $i->updateIssue( $id, "ignoreP" );
     wfScanner::shared()->recordLastScanTime();'
   t=$(token_of "$(connect)"); [ "$(call status "$t")" = 200 ]
   jq -e '.wordfence.ignored == 1 and (.wordfence.lastScanAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$"))' out/status.json
-  jq -e '.wordfence.issues | length == 1 and .[0].type == "wfPluginUpgrade" and .[0].severity == 75 and (.[0].shortMsg | length) <= 300 and (.[0].shortMsg | length) > 0 and (.[0].firstSeenAt | type == "string") and (.[0] | keys | sort) == ["firstSeenAt","severity","shortMsg","type"]' out/status.json
+  jq -e '.wordfence.issues | length == 1 and .[0].type == "wfPluginUpgrade" and .[0].severity == 75 and .[0].shortMsg == "PSR-short-marker in wp-content/plugins/x.php" and (.[0].firstSeenAt | type == "string") and (.[0] | keys | sort) == ["firstSeenAt","severity","shortMsg","type"]' out/status.json
+  ! grep -q 'PSR-long-marker' out/status.json || return 1               # shortMsg, never longMsg
   ! grep -q 'private-data' out/status.json || return 1                  # Wordfence's per-issue data never leaves
   jq -e '.wordpress.updatesCheckedAt != null' out/status.json
-  jq -e '.plugins[] | select(.file == "akismet/akismet.php") | .active == false and .version == "5.0" and (.update | type == "string")' out/status.json
-  jq -e '.themes[] | select(.stylesheet == "twentytwentyone") | (.update | type == "string") and .active == false' out/status.json
+  jq -e '.plugins[] | select(.file == "akismet/akismet.php") | .active == false and .version == "5.0" and (.update | type == "string") and .autoUpdate == true' out/status.json
+  jq -e '.plugins[] | select(.file == "puzzles-site-reports/puzzles-site-reports.php") | .autoUpdate == false' out/status.json
+  jq -e '.themes[] | select(.stylesheet == "twentytwentyone") | (.update | type == "string") and .active == false and .parent == null' out/status.json
+  jq -e '.themes[] | select(.stylesheet == "psr-child") | .parent == "twentytwentyone" and .active == false and .name == "PSR Child"' out/status.json
+  jq -e '.mustUse[] | select(.file == "psr-test-mu.php") | . == {"file": "psr-test-mu.php", "name": "PSR Test MU", "version": "1.2.3"}' out/status.json
   jq -e '.wordfence.active == true and (.wordfence.issues | type == "array") and (.wordfence | has("lastScanAt"))' out/status.json
   jq -e '.comments.defaultStatus == "closed"' out/status.json
   jq -e '(.wordfence | keys | sort) == ["active","ignored","issues","lastScanAt","version"]' out/status.json
   ! grep -q '/var/www' out/status.json || return 1
   wpcli plugin deactivate wordfence
   [ "$(call status "$t")" = 200 ]
-  jq -e '.wordfence.active == false' out/status.json # installed but inactive: still reported, no fatal
+  # installed but inactive: still reported, its classes are not loaded, so nothing is read, no fatal
+  jq -e '.wordfence.active == false and .wordfence.issues == [] and .wordfence.ignored == 0 and .wordfence.lastScanAt == null' out/status.json
+  # State left for later cases: the test mu-plugin, child theme and akismet auto-update are removed and the comment default is
+  # back to "open"; still there: Wordfence (installed, inactive, with its two seeded issues), akismet 5.0 (inactive),
+  # twentytwentyone 1.0, filled update transients, and the current connection token.
+  wpcli eval 'unlink( WPMU_PLUGIN_DIR . "/psr-test-mu.php" );'
+  wpcli theme delete psr-child
+  wpcli plugin auto-updates disable akismet
+  wpcli option update default_comment_status open
 }
 
 # Fixed order (Task rulings). A new case is added to BOTH the function list and this one;
