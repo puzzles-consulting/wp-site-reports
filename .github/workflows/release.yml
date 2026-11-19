@@ -36,8 +36,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      # The plain build, never with --test-overrides: scripts/promote.sh signs it only if its own build of the tag's raw
-      # tree has the same sha256 (the smoke builds its test zip apart, in tests/out/testzip).
+      # The plain build, no --test-overrides (scripts/promote.sh's header says why).
       - run: bash scripts/build.sh "${TAG#v}"
       - run: bash tests/smoke.sh
       - name: Pre-release the zip only

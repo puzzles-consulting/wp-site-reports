@@ -4,11 +4,10 @@
 #   --src   the tree to build (default: this checkout); --out  where the zip goes (default: this checkout's dist/).
 # The zip is byte-reproducible: the same tree gives the same sha256 on any machine (entries sorted, fixed time and mode,
 # stored uncompressed because zlib output can differ between builds, no directory entries, Python isolated with -I).
-# scripts/promote.sh relies on it: it builds a tag's raw tree with this script and signs only a release zip with that
-# exact sha256.
+# scripts/promote.sh relies on it (its header).
 # --test-overrides <file>: tests only (tests/smoke.sh). Each line "<CONSTANT> <value>" replaces one of the update
 # constants PUZZLES_SR_UPDATE_PUBKEY, PUZZLES_SITE_REPORTS_MANIFEST_URL or PUZZLES_SITE_REPORTS_PACKAGE_PREFIX in the
-# staged copy. release.yml never passes it, and promote.sh would refuse such a zip (its sha256 differs).
+# staged copy.
 set -euo pipefail
 die() { echo "build.sh: $*" >&2; exit 1; }
 V="${1:?usage: build.sh <version> [--src <dir>] [--out <dir>] [--test-overrides <file>]}"; shift
@@ -48,8 +47,8 @@ if [ -n "$OVR" ]; then
 fi
 
 PY=python3; "$PY" -I -c '' 2>/dev/null || PY=python # python3 may be a Windows store stub
-# Relative paths only: Git Bash does not convert path arguments for Windows Python when MSYS_NO_PATHCONV is set.
 # Writes the zip and prints its entries (the CI log shows what ships).
+# Relative paths only: Git Bash does not convert path arguments for Windows Python when MSYS_NO_PATHCONV is set.
 cd "$OUT"
 "$PY" -I - <<'PYEOF'
 import os, zipfile

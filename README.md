@@ -58,14 +58,14 @@ bash tests/promote-dry-run.sh     # scripts/promote.sh against a throwaway origi
 3. Sign and promote it, which rolls it out to every site on its next update check:
    `bash scripts/promote.sh vX.Y.Z <tested>`. Type `<tested>` yourself: it is the WordPress version the release notes
    say the smoke test ran on (`Tested with WordPress 6.8.1`). Never paste a command from release notes: anyone with
-   write access can edit them. What the script checks before it signs, and every option, is in the header of
-   [`scripts/promote.sh`](scripts/promote.sh). In short: it builds the tag's raw tree with this checkout's own
-   [`scripts/build.sh`](scripts/build.sh) and signs only if the release's zip has exactly that sha256.
+   write access can edit them. What the script checks before it signs, every option and how it handles the key are in
+   the header of [`scripts/promote.sh`](scripts/promote.sh).
 
-   Run it only on the owner's machine, from a checkout of `main` you have reviewed: it runs that checkout's scripts.
-   Give the release key (from the secret store, never on disk) to that one command only, as `PUZZLES_SR_SIGNING_KEY`
-   in its environment. The script unsets it before running anything, so none of its child processes inherits it, but
-   it cannot hide it from whatever started it or from anything else that environment reaches.
+   Run it only on the owner's machine, from a clean checkout of `main` you have reviewed (it runs that checkout's
+   scripts, and the tag must be in its history), with the release key from the secret store in that one command's
+   environment. Before it signs, it prints what the release ships against the latest promoted one (the full diff of the
+   main file, which holds the update code and the key) and asks you to type the version: review that diff first. The
+   canary is a functional check, not a review.
 
 The release key is created with `bash scripts/keygen.sh`: the public key goes into `PUZZLES_SR_UPDATE_PUBKEY`, the
 secret key goes from file descriptor 3 straight into the secret store (the script's header shows how).

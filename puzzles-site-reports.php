@@ -20,6 +20,13 @@ if ( ! defined( 'ABSPATH' ) ) {
 define( 'PUZZLES_SITE_REPORTS_VERSION', '1.0.0' );
 define( 'PUZZLES_SITE_REPORTS_OPTION', 'puzzles_site_reports_token' );
 define( 'PUZZLES_SITE_REPORTS_NAMESPACE', 'puzzles-reports/v1' );
+// The self-update's constants ("Self-update" below), defined before any include so that none can define them first. No
+// filter changes them: the smoke test builds its own zip with other values (scripts/build.sh --test-overrides).
+define( 'PUZZLES_SITE_REPORTS_MANIFEST_URL', 'https://github.com/puzzles-consulting/wp-site-reports/releases/latest/download/manifest.json' );
+define( 'PUZZLES_SITE_REPORTS_PACKAGE_PREFIX', 'https://github.com/puzzles-consulting/wp-site-reports/releases/download/' );
+// Base64 Ed25519 public key of the release signing key (created 2026-11-19; the secret key is held outside GitHub).
+// A new key means a release that ships the new public key, signed with the old one (README, Release).
+define( 'PUZZLES_SR_UPDATE_PUBKEY', 'FRx/KzeXTPzD6VBigvVottDDryTawD19IRq0FQ8uMXc=' );
 
 /** Plain text for the portal: no markup, entities decoded, trimmed; null when nothing is left. */
 function puzzles_sr_plain( $v ): ?string {
@@ -175,15 +182,9 @@ add_action(
 // ---- Self-update from GitHub Releases, signed ----
 // Core runs the offer only inside its own update check (cron or admin), never on a front-end request, and caches the
 // answer in the update_plugins transient, so nothing is cached here. Any failure leaves WordPress' answer untouched.
-// A manifest counts only when its Ed25519 signature over all its fields verifies with the key below, and the package is
-// installed only when it hashes to the signed sha256. The signing key never lives in GitHub (README, Release): write
-// access to the repository alone cannot ship a zip to the sites. No filter changes these constants: the smoke test
-// builds its own zip with other values (scripts/build.sh --test-overrides).
-define( 'PUZZLES_SITE_REPORTS_MANIFEST_URL', 'https://github.com/puzzles-consulting/wp-site-reports/releases/latest/download/manifest.json' );
-define( 'PUZZLES_SITE_REPORTS_PACKAGE_PREFIX', 'https://github.com/puzzles-consulting/wp-site-reports/releases/download/' );
-// Base64 Ed25519 public key of the release signing key (created 2026-11-19; the secret key is held outside GitHub).
-// A new key means a release that ships the new public key, signed with the old one (README, Release).
-define( 'PUZZLES_SR_UPDATE_PUBKEY', 'FRx/KzeXTPzD6VBigvVottDDryTawD19IRq0FQ8uMXc=' );
+// A manifest counts only when its Ed25519 signature over all its fields verifies with PUZZLES_SR_UPDATE_PUBKEY (top of
+// this file), and the package is installed only when it hashes to the signed sha256. The signing key never lives in
+// GitHub (README, Release): write access to the repository alone cannot ship a zip to the sites.
 define( 'PUZZLES_SITE_REPORTS_MAX_PACKAGE', 5 * 1024 * 1024 ); // bytes; the zip is well under 1 MB
 
 /**
