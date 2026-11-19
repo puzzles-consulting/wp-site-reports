@@ -1,0 +1,14 @@
+{
+  "extraKnownMarketplaces": {
+    "puzzles": {
+      "source": {
+        "source": "github",
+        "repo": "puzzles-consulting/claude-workspace"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "base@puzzles": true,
+    "living-docs@puzzles": true
+  }
+}
