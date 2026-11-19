@@ -27,11 +27,46 @@ wpcli core install --url=http://localhost:8080 --title=Smoke --admin_user=admin 
 wpcli plugin install /dist/puzzles-site-reports.zip --activate --force
 wpcli core version | tr -d '\r\n' > out/wp-version.txt # the manifest's `tested`: the WordPress this run is on
 
+put_mu() { # put_mu <file> <php>: writes a must-use plugin (base64 through wp eval, so no shell quoting reaches PHP)
+  local b; b=$(printf '%s' "$2" | base64 | tr -d '\n')
+  wpcli eval "wp_mkdir_p( WPMU_PLUGIN_DIR ); file_put_contents( WPMU_PLUGIN_DIR . '/$1', base64_decode( '$b' ) );"
+}
+
+# A throwaway Ed25519 keypair signs this run's manifests; the test-only filter swaps its public key in for the plugin's.
+kp=$(wpcli eval '$k = sodium_crypto_sign_keypair(); echo base64_encode( $k ), " ", base64_encode( sodium_crypto_sign_publickey( $k ) );' | tr -d '\r\n')
+KP=${kp% *}; PK=${kp#* }
+[ "${#KP}" -eq 128 ] # base64 of the 96-byte keypair
+[ "${#PK}" -eq 44 ]
+
 # Hermetic: the update check reads a manifest served by this stack (http://wp/..., a 404 until case_update_offer writes
 # one), never GitHub's. Present from here on, so no case can reach the real URL.
-mu='<?php add_filter( "puzzles_site_reports_manifest_url", function () { return "http://wp/test-manifest.json"; } ); add_filter( "puzzles_site_reports_package_prefix", function () { return "http://wp/releases/download/"; } );'
-b=$(printf '%s' "$mu" | base64 | tr -d '\n')
-wpcli eval "wp_mkdir_p( WPMU_PLUGIN_DIR ); file_put_contents( WPMU_PLUGIN_DIR . '/psr-update.php', base64_decode( '$b' ) );"
+mu='<?php
+add_filter( "puzzles_site_reports_manifest_url", function () { return "http://wp/test-manifest.json"; } );
+add_filter( "puzzles_site_reports_package_prefix", function () { return "http://wp/releases/download/"; } );
+add_filter( "puzzles_sr_update_pubkey", function () { return "__PK__"; } );
+add_filter( "http_request_host_is_external", function ( $ok, $host ) { return "wp" === $host ? true : $ok; }, 10, 2 ); // download_url() refuses private hosts
+
+/** Writes the manifest the update check reads, signed with $kp (a base64 keypair; none when empty); $extra overrides fields. */
+function puzzles_sr_test_manifest( $version, $sha, $kp, array $extra = array() ) {
+	$m = array( "version" => $version, "sha256" => $sha, "requires" => "5.8", "requires_php" => "7.4", "tested" => "6.9" );
+	if ( "" !== $kp ) {
+		$m["signature"] = base64_encode( sodium_crypto_sign_detached( $version . "\n" . $sha, sodium_crypto_sign_secretkey( base64_decode( $kp ) ) ) );
+	}
+	file_put_contents( ABSPATH . "test-manifest.json", wp_json_encode( array_merge( $m, $extra ) ) );
+}
+
+/** The download hook called directly: "<sha256 of the file it returned> <temp files left>", or "<error code or false> <temp files left>". */
+function puzzles_sr_test_download( $package ) {
+	$r    = apply_filters( "upgrader_pre_download", false, $package, null, array() );
+	$left = count( glob( get_temp_dir() . "puzzles-site-reports*" ) );
+	if ( is_string( $r ) ) {
+		$h = hash_file( "sha256", $r );
+		unlink( $r );
+		return "$h $left";
+	}
+	return ( is_wp_error( $r ) ? $r->get_error_code() : var_export( $r, true ) ) . " $left";
+}'
+put_mu psr-update.php "${mu//__PK__/$PK}"
 
 # Apache may lag behind `core install` (which went through WP-CLI): wait until WordPress answers over HTTP.
 for _ in $(seq 1 40); do
@@ -50,6 +85,7 @@ base64url_decode() { # stdin -> stdout; re-pads and maps -_ to +/
 }
 connect() { wpcli puzzles-site-reports connect --porcelain | tr -d '\r\n'; } # prints the connection string
 token_of() { local s="$1"; echo "${s#pzr1.}" | base64url_decode | jq -r .token; }
+fresh_token() { token_of "$(connect)"; } # rotates the connection, prints the new token
 call() { # call <route> [token] -> HTTP status; the body lands in out/<route>.json
   local h=(); [ -z "${2:-}" ] || h=(-H "X-Puzzles-Reports-Token: $2")
   curl -s -o "out/$1.json" -w '%{http_code}' "${h[@]}" "http://localhost:8080/?rest_route=/puzzles-reports/v1/$1&_=$(date +%s%N)"
@@ -219,39 +255,73 @@ case_seo_with_rank_math() {
   wpcli eval 'foreach ( get_posts( array( "post_type" => "page", "post_status" => "any", "meta_key" => "psr_seed", "numberposts" => -1, "fields" => "ids" ) ) as $id ) { wp_delete_post( $id, true ); }'
 }
 
-case_update_offer() { # a local manifest (served by the wp container, reached as http://wp) offers 9.9.9
+case_update_offer() { # manifests signed by this run's throwaway key, served by the wp container (reached as http://wp)
   ours=puzzles-site-reports/puzzles-site-reports.php
   pkg=http://wp/releases/download/v9.9.9/puzzles-site-reports.zip
-  manifest() { # manifest <version> <package>: written into the wp container's web root
-    wpcli eval "file_put_contents( ABSPATH . 'test-manifest.json', json_encode( array( 'version' => '$1', 'package' => '$2', 'requires' => '5.8', 'requires_php' => '7.4', 'tested' => '6.9' ) ) );"
+  sha=$(sha256sum ../dist/puzzles-site-reports.zip | cut -c1-64)
+  kp2=$(wpcli eval 'echo base64_encode( sodium_crypto_sign_keypair() );' | tr -d '\r\n') # another key
+  # the release asset: this run's own zip, so the real update at the end reinstalls the same plugin
+  wpcli eval "wp_mkdir_p( ABSPATH . 'releases/download/v9.9.9' ); copy( '/dist/puzzles-site-reports.zip', ABSPATH . 'releases/download/v9.9.9/puzzles-site-reports.zip' );"
+  [ "$(curl -fs http://localhost:8080/releases/download/v9.9.9/puzzles-site-reports.zip | sha256sum | cut -c1-64)" = "$sha" ]
+
+  manifest() { # manifest <version> <sha256> [keypair; '' = unsigned] [extra PHP array items]
+    wpcli eval "puzzles_sr_test_manifest( '$1', '$2', '${3-$KP}', array( ${4:-} ) );"
   }
   check() { wpcli transient delete update_plugins --network; wpcli eval 'wp_update_plugins();'; }
   offered() { wpcli plugin list --name=puzzles-site-reports --field=update_version | tr -d '\r\n'; }
   filter() { # filter <installed-version> <plugin-file>: our update filter called directly; "input" is what core handed in
     wpcli eval "echo wp_json_encode( puzzles_sr_update_offer( 'input', array( 'Version' => '$1' ), '$2', array() ) );" | tr -d '\r\n'
   }
+  download() { wpcli eval "echo puzzles_sr_test_download( '${1:-$pkg}' );" | tr -d '\r\n'; } # see the setup mu-plugin
+  not_offered() { # neither the update check nor the filter called directly (which api.wordpress.org cannot mask) offers anything
+    check
+    local o f; o=$(offered); f=$(filter 1.0.0 "$ours")
+    [ -z "$o" ]
+    [ "$f" = '"input"' ]
+  }
 
-  # no manifest file yet (the setup mu-plugin points at it; WordPress answers its 404): nothing is offered, the input comes back
-  check; [ -z "$(offered)" ]
-  [ "$(filter 1.0.0 "$ours")" = '"input"' ]
+  not_offered # no manifest yet (WordPress answers its 404)
 
-  manifest 9.9.9 "$pkg"
-  curl -fs http://localhost:8080/test-manifest.json | grep -q '9.9.9'
+  # signed: offered, with the package derived from the version (a `package` field is ignored) and the sha256 kept by core
+  manifest 9.9.9 "$sha" "$KP" "'package' => 'http://evil.example/x.zip'"
+  curl -fs http://localhost:8080/test-manifest.json | grep -q '"signature"'
   check
-  [ "$(offered)" = "9.9.9" ]
-  wpcli eval '$u = get_site_transient( "update_plugins" ); echo $u->response["puzzles-site-reports/puzzles-site-reports.php"]->package;' | grep -qx "$pkg"
-  [ "$(filter 1.0.0 "$ours")" != '"input"' ]                  # the offer is real...
-  [ "$(filter 99.0.0 "$ours")" = '"input"' ]                  # ...but not when the installed version is not older
-  [ "$(filter 1.0.0 akismet/akismet.php)" = '"input"' ]       # ...and never for another plugin's file
+  o=$(offered); [ "$o" = 9.9.9 ]
+  o=$(wpcli eval '$u = get_site_transient( "update_plugins" )->response["puzzles-site-reports/puzzles-site-reports.php"]; echo $u->package, " ", $u->sha256;' | tr -d '\r\n')
+  [ "$o" = "$pkg $sha" ]
+  f=$(filter 1.0.0 "$ours"); [ "$f" != '"input"' ]; [[ $f != *evil* ]]   # the offer is real...
+  f=$(filter 99.0.0 "$ours"); [ "$f" = '"input"' ]                        # ...but not when the installed version is not older
+  f=$(filter 1.0.0 akismet/akismet.php); [ "$f" = '"input"' ]             # ...and never for another plugin's file
   wpcli eval 'echo (int) apply_filters("auto_update_plugin", false, (object) ["plugin" => "puzzles-site-reports/puzzles-site-reports.php"]);' | grep -qx 1
   wpcli eval 'echo (int) apply_filters("auto_update_plugin", false, (object) ["plugin" => "akismet/akismet.php"]);' | grep -qx 0
+  # the download hook fetches our package and accepts it (one temp file, handed to core); any other package is core's
+  o=$(download); [ "$o" = "$sha 1" ]
+  o=$(download http://wp/releases/download/v9.9.8/puzzles-site-reports.zip); [ "$o" = "false 0" ]
 
-  # nothing is offered unless the package is exactly this version's release asset, the version is X.Y.Z, and the body is a manifest
-  manifest 9.9.9 http://wp/releases/download/../../x/v9.9.9/puzzles-site-reports.zip; check; [ -z "$(offered)" ]
-  manifest 9.9.9 http://wp/releases/download/v9.9.8/puzzles-site-reports.zip; check; [ -z "$(offered)" ]
-  manifest 9.9.9 http://wp/other/v9.9.9/puzzles-site-reports.zip; check; [ -z "$(offered)" ]
-  manifest 9.9.9-beta http://wp/releases/download/v9.9.9-beta/puzzles-site-reports.zip; check; [ -z "$(offered)" ]
-  wpcli eval 'file_put_contents( ABSPATH . "test-manifest.json", "not json" );'; check; [ -z "$(offered)" ]
+  # nothing is offered unless the key signed exactly this version and sha256, and both are well formed
+  manifest 9.9.9 "$sha" ''; not_offered                                                    # unsigned
+  manifest 9.9.9 "$sha" "$KP" "'signature' => str_repeat( 'A', 86 ) . '=='"; not_offered  # well formed, does not verify
+  manifest 9.9.9 "$sha" "$KP" "'signature' => 'AAAA'"; not_offered                        # wrong length
+  manifest 9.9.9 "$sha" "$kp2"; not_offered                                                 # signed by another key
+  manifest 9.9.9 "$sha" "$KP" "'version' => '9.9.10'"; not_offered                         # signed for another version
+  manifest 9.9.9-beta "$sha"; not_offered                                                   # not X.Y.Z, though signed
+  manifest 9.9.9 "$(tr a-f A-F <<<"$sha")"; not_offered                                     # not lowercase hex, though signed
+  wpcli eval 'file_put_contents( ABSPATH . "test-manifest.json", "not json" );'; not_offered
+
+  # a signed sha256 the zip does not have: offered, but the download is refused, its temp file deleted, and the update fails
+  manifest 9.9.9 "$(printf x | sha256sum | cut -c1-64)"
+  check; o=$(offered); [ "$o" = 9.9.9 ]
+  o=$(download); [ "$o" = "puzzles_sr_bad_package 0" ]
+  o=$(wpcli plugin update puzzles-site-reports 2>&1) && { echo "$o"; return 1; }
+  grep -q 'does not match its signed manifest' <<<"$o"
+  [ "$(wpcli plugin get puzzles-site-reports --field=status)" = active ]
+
+  # end to end: core installs the signed zip through the hook; the connection survives (core deactivates silently to update)
+  t=$(fresh_token)
+  manifest 9.9.9 "$sha"; check
+  wpcli plugin update puzzles-site-reports
+  [ "$(wpcli plugin get puzzles-site-reports --field=status)" = active ]
+  [ "$(call status "$t")" = 200 ]
   wpcli eval 'unlink( ABSPATH . "test-manifest.json" );'
 }
 

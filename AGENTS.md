@@ -34,5 +34,8 @@ also on failure: never leave containers running. On Windows Git Bash `smoke.sh` 
   as any route change, plus `CHANGELOG.md` under `[Unreleased]`.
 - Zip top folder is `puzzles-site-reports/`; `build.sh` rewrites `Version:` and
   `PUZZLES_SITE_REPORTS_VERSION` to its argument.
+- Updates are signed (README, Updates and Release): CI publishes only a pre-release zip; `scripts/promote.sh`
+  signs and promotes it on the owner's machine. The signing key never goes into GitHub (secrets, CI, files), and
+  `PUZZLES_SR_UPDATE_PUBKEY` is the only key the plugin trusts.
 - Commits are authored as `Puzzles Internal <internal@puzzles.consulting>`; the why goes in the body.
 - Pushing waits for the owner's OK.

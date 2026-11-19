@@ -1,7 +1,6 @@
 name: Release
-# A `vX.Y.Z` tag lints PHP on every supported version, builds the zip, runs the smoke test on that exact zip and only
-# then publishes a PRE-release. Sites follow `releases/latest`, which GitHub never points at a pre-release: promoting it
-# (`gh release edit vX.Y.Z --prerelease=false --latest`) is what rolls it out.
+# A `vX.Y.Z` tag: PHP lint on 7.4 to 8.4, build, smoke on that exact zip, then a PRE-release of the zip alone (no manifest:
+# no site sees it until the owner signs and promotes it with scripts/promote.sh, README > Release).
 on:
   push:
     tags: ['v*']
@@ -39,10 +38,12 @@ jobs:
           persist-credentials: false
       - run: bash scripts/build.sh "${TAG#v}"
       - run: bash tests/smoke.sh
-      - name: The smoke test must have recorded its WordPress version
-        run: '[ -s tests/out/wp-version.txt ] || { echo "tests/out/wp-version.txt is missing or empty" >&2; exit 1; }'
-      - run: bash scripts/manifest.sh "${TAG#v}" "$(cat tests/out/wp-version.txt)" # the WordPress the smoke just ran on
-      - run: gh release create "$TAG" dist/puzzles-site-reports.zip dist/manifest.json --prerelease --generate-notes
+      - name: Pre-release the zip only
+        run: |
+          WP="$(cat tests/out/wp-version.txt)"
+          [ -n "$WP" ] || { echo "tests/out/wp-version.txt is missing or empty" >&2; exit 1; }
+          gh release create "$TAG" dist/puzzles-site-reports.zip --prerelease --generate-notes \
+            --notes "Smoke-tested on WordPress $WP: promote with \`scripts/promote.sh $TAG $WP\`."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
