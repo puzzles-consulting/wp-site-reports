@@ -78,27 +78,24 @@ Re-installing a reviewed copy is the only way promotion changes: when a change t
 to `scripts/build.sh` that changes the zip's bytes needs the same change in the promoter: until it is re-installed, it
 refuses those releases.
 
-The record. Each promotion writes a local ref in the clone it ran in, `refs/puzzles-sr/promoted/vX.Y.Z`: the baseline
-of the next review. Never push it or fetch into it. Keep one promotion clone (`--repo` is its top folder) and always
-promote from it; `git -C <clone> fetch origin` is all it needs. Dry runs go in throwaway clones: the promoter refuses a
-dry run in a clone with a real record, and a real run in a clone with dry-run records.
+The record. Each promotion prints the tag's commit and the zip's sha256 (keep both) and writes them to a local ref in
+the clone it ran in, `refs/puzzles-sr/promoted/vX.Y.Z`: your statement of what you signed. GitHub's latest release must
+be one you recorded, with that sha256, and the highest record is the baseline of the next review. Never push it or
+fetch into it. Keep one promotion clone (`--repo` is its top folder) and always promote from it;
+`git -C <clone> fetch origin` is all it needs. Dry runs go in throwaway clones: the promoter refuses a dry run in a
+clone with a real record, and a real run in a clone with dry-run records.
 
-- Another clone or machine: copy every record from the clone that has them, after reviewing them there
-  (`git -C <old clone> for-each-ref refs/puzzles-sr/promoted`):
-  `git -C <old clone> for-each-ref --format='update %(refname) %(objectname)' refs/puzzles-sr/promoted | git -C <new clone> update-ref --stdin`.
-  If the old clone is lost, start over as a first promotion. If GitHub's latest is then a key-rotation release,
-  record by hand the release before it too (it signed with the old key): `git -C <new clone> update-ref
-  refs/puzzles-sr/promoted/vX.Y.Z <sha>`, with the commit sha your promotion printed for it (`vX.Y.Z is commit
-  <sha>`), never the sha origin's tag shows now: a tag can move. The promoter rebuilds every record it relies on and
-  refuses one that does not build the zip that was signed.
+- Another clone or machine: copy the records from the clone that has them:
+  `git -C <new clone> fetch <old clone> 'refs/puzzles-sr/promoted/*:refs/puzzles-sr/promoted/*'` (a one-off command,
+  never a configured refspec).
+  If the old clone is lost, record GitHub's latest release (and your highest promotion, if it is another one) with the
+  values its promotion printed: `bash ~/bin/wp-sr-promote record --repo <clone> vX.Y.Z <commit> <zip sha256>`. It
+  checks that GitHub's zip has that sha256 and holds that commit's files.
 - Bad release: `gh release edit vX.Y.Z --prerelease` stops the spread, and GitHub's latest falls back to an earlier
-  release you recorded, which the next promotion accepts. Sites already on it are fixed only by rolling forward to
-  `X.Y.Z+1`, promoted as usual. Never mark a key-rotation release pre-release (sites on it trust only the new key):
-  fix forward with the new key. Never mark your first-ever promotion pre-release; if you did, restore it
-  (`gh release edit vX.Y.Z --prerelease=false --latest`) and promote `X.Y.Z+1`, or delete its record and start over.
-- Interrupted promotion (stopped after the release went live, before it was recorded): the next run finds that GitHub's
-  latest is the promotion it left pending, with the zip it signed, and asks you to type its version to record it. If
-  that was the release you asked for, nothing is left to do; otherwise run again.
+  release you recorded. Sites already on it are fixed only by rolling forward to `X.Y.Z+1`, promoted as usual. Never
+  mark a key-rotation release pre-release (sites on it trust only the new key): fix forward with the new key. If
+  something else went wrong (your first promotion marked pre-release, an interrupted run), the promoter tells you how
+  to restore.
 
 Branch protection on `main` and restricting who can create `v*` tags on GitHub are still recommended: they are
 repository settings, the owner's decision.
