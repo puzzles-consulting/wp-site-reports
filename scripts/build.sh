@@ -4,8 +4,7 @@
 #   --src   the tree to build (default: this checkout); --out  where the zip goes (default: this checkout's dist/).
 # The zip is byte-reproducible: the same tree gives the same sha256 on any machine (entries sorted, fixed time and mode,
 # stored uncompressed because zlib output can differ between builds, no directory entries, Python isolated with -I).
-# scripts/wp-sr-promote, the owner's promoter, builds the same bytes with its own copy of this logic and requires the
-# release zip to match: a change to the bytes needs the same change there (tests/promote-dry-run.sh compares the two).
+# The owner's promoter (scripts/wp-sr-promote) reviews and signs the zip that CI builds with this script.
 # --test-overrides <file>: tests only (tests/smoke.sh). Each line "<CONSTANT> <value>" replaces one of the update
 # constants PUZZLES_SR_UPDATE_PUBKEY, PUZZLES_SITE_REPORTS_MANIFEST_URL or PUZZLES_SITE_REPORTS_PACKAGE_PREFIX in the
 # staged copy.
@@ -27,15 +26,14 @@ done
 
 S="$OUT/stage/puzzles-site-reports"
 rm -rf "$OUT/stage" "$OUT/puzzles-site-reports.zip" && mkdir -p "$S"
-# allowlist: only these ship, whatever else sits in the tree
-(cd "$SRC" && cp puzzles-site-reports.php uninstall.php README.md CHANGELOG.md LICENSE "$S/" && cp -r includes "$S/")
-# The promoter refuses anything else (scripts/wp-sr-promote): every shipped file is plain ASCII, and only PHP holds "<?".
+# allowlist: only these ship, whatever else sits in the tree (not README or CHANGELOG: they would tell anyone the version)
+(cd "$SRC" && cp puzzles-site-reports.php uninstall.php LICENSE "$S/" && cp -r includes "$S/")
+# The promoter refuses anything else: every shipped file is plain ASCII, and only PHP holds "<?".
 BAD=$(cd "$S" && { LC_ALL=C grep -rlaUE $'[^\t -~]' . || true; }); [ -z "$BAD" ] || die "not plain ASCII (TAB, LF, printable):" $BAD
 BAD=$(cd "$S" && { grep -rlF '<?' --exclude='*.php' . || true; }); [ -z "$BAD" ] || die "not PHP but holds '<?':" $BAD
 
 F="$S/puzzles-site-reports.php"
-# Anchored: only these two whole lines are rewritten, and each must be there exactly once (scripts/wp-sr-promote checks
-# it before the owner's review and repeats this rewrite).
+# Anchored: only these two whole lines are rewritten, and each must be there exactly once (the promoter checks it too).
 sed -i -E "s/^( \* Version:) +[0-9]+\.[0-9]+\.[0-9]+\$/\1 $V/; s/^(define\( 'PUZZLES_SITE_REPORTS_VERSION', ')[0-9]+\.[0-9]+\.[0-9]+(' \);)\$/\1$V\2/" "$F"
 [ "$(grep -cxF " * Version: $V" "$F")" = 1 ] || die "the main file needs exactly one ' * Version: X.Y.Z' line"
 [ "$(grep -cxF "define( 'PUZZLES_SITE_REPORTS_VERSION', '$V' );" "$F")" = 1 ] || die "the main file needs exactly one PUZZLES_SITE_REPORTS_VERSION define"
