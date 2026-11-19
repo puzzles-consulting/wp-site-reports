@@ -189,7 +189,7 @@ define( 'PUZZLES_SITE_REPORTS_MAX_PACKAGE', 5 * 1024 * 1024 ); // bytes; the zip
 
 /**
  * The manifest when every signed field is well formed and the signature verifies, else null. The signed message is the
- * fields below joined by "\n", in this order (scripts/promote.sh builds the same string).
+ * fields below joined by "\n", in this order (scripts/wp-sr-promote builds the same string).
  */
 function puzzles_sr_verified_manifest( string $body ): ?array {
 	$m = json_decode( $body, true );

@@ -1,0 +1,364 @@
+#!/usr/bin/env bash
+# wp-sr-promote: the whole promoter and key generator of Puzzles Site Reports' signed updates. The owner reviews this
+# file by hand and installs it outside the repository (README, Release); re-installing a reviewed copy is the only way
+# promotion changes. It runs NOTHING from the repository: the tag's files are read as git blobs (data), the zip is built
+# here (the same bytes as scripts/build.sh, which CI uses; the test proves it), the signature is made by PHP's sodium
+# (php on PATH, else the image pinned below), and the manifest is uploaded with gh. Never in CI: the key never lives in
+# GitHub.
+#
+# Usage:
+#   wp-sr-promote keygen 3>&1 1>&2 | <store-secret-from-stdin>
+#       A new release keypair: the base64 public key on stdout (it goes into PUZZLES_SR_UPDATE_PUBKEY), the base64
+#       secret key on file descriptor 3 only (never an argument, a file or the terminal).
+#   wp-sr-promote --repo <clone> vX.Y.Z <tested> [--rotate]
+#       PUZZLES_SR_SIGNING_KEY: the secret key sites trust now; with --rotate (the tag ships a new
+#       PUZZLES_SR_UPDATE_PUBKEY) also PUZZLES_SR_NEW_SIGNING_KEY, its secret key, as proof. The release is signed with
+#       the key sites trust now. <tested>: the WordPress version of the release's smoke test, typed by the owner (the
+#       release notes say which; never paste a command from them). Put the keys in this one command's environment.
+#   wp-sr-promote --repo <throwaway clone> vX.Y.Z <tested> --dry-run <zip> [--trusted-zip <zip>] [--rotate]
+#       Every check and the signature, with <zip> standing in for the release's asset and <trusted-zip> for GitHub's
+#       latest release (without it: no key, version or record check), no gh call, no origin URL check; prints the
+#       manifest. Keys: PUZZLES_SR_DRY_RUN_KEY (and PUZZLES_SR_DRY_RUN_NEW_KEY), throwaway ones only: the release key
+#       variables are refused, and so is a key found in the clone's HEAD history. A dry run refuses a clone that holds a
+#       real record, and a real run one that holds dry-run records.
+# The keys are copied and unset first: no child process inherits one; PHP gets them on stdin.
+#
+# The control is the owner's review of what step 3 prints; the checks make it complete and hard to disguise.
+#   1. The tag is one commit, the same locally and on origin (exact `refs/tags/vX.Y.Z` in `git ls-remote --tags`), on
+#      origin's main; origin is github.com/puzzles-consulting/wp-site-reports (real runs). No fetch refspec may write
+#      outside refs/remotes/ and refs/tags/ (the record below is local).
+#   2. GitHub's latest release gives the key and version sites have now: its tag must be v<the version in its zip>, and
+#      its manifest must match its zip and verify with its own key or the key of a recorded promotion (a rotation
+#      release is signed with the old one). The baseline is the owner's record, refs/puzzles-sr/promoted/vX.Y.Z -> the
+#      commit signed, written only by this script (refs/puzzles-sr/pending/vX.Y.Z just before it goes live), local only
+#      (never push it or fetch into it); it is only the baseline of the review, never trusted code. The latest release
+#      must be one recorded here (after a bad release is marked pre-release, an older recorded one is latest again). If
+#      it is instead the pending one of a run stopped after it went live, the owner is offered to record it. The tag
+#      must be newer than both the latest release and the highest record. No record (the first promotion in this
+#      clone): the baseline is empty and everything is new.
+#   3. Only the allowlist of shipped files is read from the tag's tree, blob by blob, each entry checked before it is
+#      written: a plain path (letters, digits and `._-`, no component starting with `.` or `-`, so no `..` and no `\`),
+#      a name Windows writes as is (no case-insensitive duplicates, no trailing `.`, no device name), mode 100644 or
+#      100755 only. No git attribute that changes a shipped file on checkout (filter, ident, working-tree-encoding,
+#      eol other than lf). The shipped PHP holds only TAB, LF and printable ASCII. The main file has exactly one version
+#      header line as WordPress reads it (its header regex, first 8 KB), in the form ` * Version: X.Y.Z`, and exactly
+#      one `define( 'PUZZLES_SITE_REPORTS_VERSION', 'X.Y.Z' );` line. Tripwires: PUZZLES_SR_UPDATE_PUBKEY is named in
+#      the main file only, defined once, before any require/include; no `constant(`, no `'PUZZLES_...' .`, no `define(`
+#      or `const` without its literal name on the same line, no constant defined twice (they catch the obvious only).
+#      Then it prints, through `cat -v`, the tag's commit and the full diff of every shipped file from the record to
+#      the tag, and the owner types the version (a real run: on a terminal, never piped).
+#   4. It builds the zip from those files and requires the release zip to have the same sha256; signs
+#      `<version>\n<sha256>\n<requires>\n<requires_php>\n<tested>` with the key sites trust now (the tag keeps it
+#      unless --rotate proves the new one); uploads manifest.json, marks the release latest and records it (2).
+KEY="${PUZZLES_SR_SIGNING_KEY:-}"; NEWKEY="${PUZZLES_SR_NEW_SIGNING_KEY:-}"
+DKEY="${PUZZLES_SR_DRY_RUN_KEY:-}"; DNEWKEY="${PUZZLES_SR_DRY_RUN_NEW_KEY:-}"
+unset PUZZLES_SR_SIGNING_KEY PUZZLES_SR_NEW_SIGNING_KEY PUZZLES_SR_DRY_RUN_KEY PUZZLES_SR_DRY_RUN_NEW_KEY
+set -euo pipefail
+umask 077
+export GIT_NO_REPLACE_OBJECTS=1 GH_REPO=puzzles-consulting/wp-site-reports
+die() { echo "wp-sr-promote: $*" >&2; exit 1; }
+PHP_IMAGE=php:8.3-cli-alpine@sha256:e7699f91d3b46283a49bde02379266dd98d87844e08aed1ff7ea6a7d1f031268 # php:8.3-cli-alpine
+php_run() { # php_run <php args...>: secrets on stdin only; the container has no network and no log
+  if command -v php >/dev/null; then php "$@"; return; fi
+  MSYS_NO_PATHCONV=1 docker run -i --rm --network none --log-driver none "$PHP_IMAGE" php "$@"
+}
+KEY_RE='^[A-Za-z0-9+/]{43}=$'
+VER_RE='^[0-9]+\.[0-9]+(\.[0-9]+)?$'
+
+if [ "${1:-}" = keygen ]; then
+  [ $# -eq 1 ] || die "usage: wp-sr-promote keygen 3>&1 1>&2 | <store-secret-from-stdin>"
+  { true >&3; } 2>/dev/null || die "keygen: open file descriptor 3 for the secret key (see the header)"
+  KP=$(php_run -r '$k = sodium_crypto_sign_keypair(); echo base64_encode( sodium_crypto_sign_publickey( $k ) ), " ", base64_encode( sodium_crypto_sign_secretkey( $k ) );' | tr -d '\r')
+  [[ "${KP%% *}" =~ $KEY_RE && "${KP#* }" =~ ^[A-Za-z0-9+/]{86}==$ ]] || die "keygen: PHP gave no keypair"
+  printf '%s' "${KP#* }" >&3
+  printf '%s\n' "${KP%% *}"
+  exit 0
+fi
+
+USAGE="usage: wp-sr-promote --repo <clone> vX.Y.Z <tested> [--rotate] [--dry-run <zip> [--trusted-zip <zip>]], or: wp-sr-promote keygen"
+REPO=""; ROTATE=""; DRY=""; TRUSTED_ZIP=""; POS=()
+while [ $# -gt 0 ]; do # every path is resolved here, before any cd
+  case "$1" in
+    --repo) REPO=$(realpath "${2:?--repo needs a clone}"); shift ;;
+    --rotate) ROTATE=1 ;;
+    --dry-run) DRY=$(realpath "${2:?--dry-run needs a zip}"); shift ;;
+    --trusted-zip) TRUSTED_ZIP=$(realpath "${2:?--trusted-zip needs a zip}"); shift ;;
+    -*) die "unknown argument: $1" ;;
+    *) POS+=("$1") ;;
+  esac
+  shift
+done
+[ -n "$REPO" ] && [ ${#POS[@]} -eq 2 ] || die "$USAGE"
+TAG=${POS[0]}; TESTED=${POS[1]}
+[[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || die "$USAGE"
+V=${BASH_REMATCH[1]}
+[[ "$TESTED" =~ $VER_RE ]] || die "bad tested: ${TESTED@Q}"
+if [ -n "$DRY" ]; then
+  [ -z "$KEY$NEWKEY" ] || die "a dry run never takes the release key: unset PUZZLES_SR_SIGNING_KEY and PUZZLES_SR_NEW_SIGNING_KEY; throwaway keys go in PUZZLES_SR_DRY_RUN_KEY"
+  KEY=$DKEY; NEWKEY=$DNEWKEY; KV=PUZZLES_SR_DRY_RUN_KEY; NKV=PUZZLES_SR_DRY_RUN_NEW_KEY
+else
+  [ -z "$DKEY$DNEWKEY" ] || die "PUZZLES_SR_DRY_RUN_KEY or PUZZLES_SR_DRY_RUN_NEW_KEY is set for a real run"
+  [ -z "$TRUSTED_ZIP" ] || die "--trusted-zip is for dry runs only"
+  KV=PUZZLES_SR_SIGNING_KEY; NKV=PUZZLES_SR_NEW_SIGNING_KEY
+fi
+[ -n "$KEY" ] || die "$KV is not set"
+if [ -n "$ROTATE" ]; then [ -n "$NEWKEY" ] || die "--rotate needs the new secret key in $NKV"
+else [ -z "$NEWKEY" ] || die "$NKV is set without --rotate"; fi
+
+W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
+mkdir "$W/nohooks"
+cd "$REPO"
+g() { git -c core.hooksPath="$W/nohooks" -c core.fsmonitor=false "$@"; } # no hook, no worktree helper
+g rev-parse --git-dir >/dev/null 2>&1 || die "${REPO@Q} is not a git clone"
+while read -r k spec; do # the record is local: no fetch may write it
+  dst=${spec#*:}
+  [ "$dst" = "$spec" ] || [ -z "$dst" ] || [[ "$dst" == refs/remotes/* || "$dst" == refs/tags/* ]] \
+    || die "$k fetches into ${dst@Q}: only refs/remotes/ and refs/tags/ may be fetched into (the record is local)"
+done <<<"$(g config --get-regexp '^remote\..*\.fetch$' || true)"
+REAL_REFS=$(g for-each-ref --format='%(refname)' refs/puzzles-sr/promoted refs/puzzles-sr/pending)
+DRY_REFS=$(g for-each-ref --format='%(refname)' refs/puzzles-sr/dry-run)
+if [ -n "$DRY" ]; then
+  [ -z "$REAL_REFS" ] || die "this clone holds your real promotion record (refs/puzzles-sr/promoted/): run dry runs in a throwaway clone"
+  REC=refs/puzzles-sr/dry-run/promoted
+else
+  [ -z "$DRY_REFS" ] || die "this clone holds dry-run records (refs/puzzles-sr/dry-run/): promote from the clone that holds your real record, never one used for dry runs"
+  REC=refs/puzzles-sr/promoted
+fi
+PEND=refs/puzzles-sr/pending
+SHIP=(puzzles-site-reports.php uninstall.php README.md CHANGELOG.md LICENSE includes) # scripts/build.sh's allowlist
+CODE=(puzzles-site-reports.php uninstall.php includes)                                # the shipped PHP
+ascii() { [ "$(LC_ALL=C tr -d '\11\12\40-\176' | wc -c)" -eq 0 ]; } # stdin: only TAB, LF and printable ASCII
+pubkey_of() { tr -d '\r' | sed -n "s/^define( 'PUZZLES_SR_UPDATE_PUBKEY', '\([^']*\)' );\$/\1/p"; } # stdin: a main file
+wp_header() { # wp_header <name>, stdin: a main file. As WordPress' get_file_data(): the first 8 KB, \r as \n, the first
+  head -c 8192 | tr '\r' '\n' | grep -iE "^([[:blank:]]*<\?php)?[[:blank:]/*#@]*$1:" | head -1 \
+    | sed -E "s/^([[:blank:]]*<\?php)?[[:blank:]/*#@]*$1:(.*)\$/\2/I; s/[[:space:]]*(\*\/|\?>).*//; s/^[[:blank:]]+//; s/[[:blank:]]+\$//"
+} # matching line, its value trimmed and cut at "*/" or "?>"
+sig_ok() { # sig_ok <public keys, space separated> <base64 signature> <message>: one of the keys verifies it
+  [ "$(printf '%s\n%s\n%s' "$1" "$2" "$3" | php_run -r '
+$keys = preg_split( "/ +/", trim( (string) fgets( STDIN ) ), -1, PREG_SPLIT_NO_EMPTY );
+$sig = base64_decode( trim( (string) fgets( STDIN ) ), true );
+$msg = stream_get_contents( STDIN );
+$ok = false;
+foreach ( $keys as $k ) {
+	$pk = base64_decode( $k, true );
+	if ( is_string( $pk ) && is_string( $sig ) && SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES === strlen( $pk ) && SODIUM_CRYPTO_SIGN_BYTES === strlen( $sig ) && sodium_crypto_sign_verify_detached( $sig, $msg, $pk ) ) {
+		$ok = true;
+	}
+}
+echo $ok ? "valid" : "invalid";
+' | tr -d '\r')" = valid ]
+}
+confirm() { # confirm <what the owner types> <prompt>
+  [ -n "$DRY" ] || [ -t 0 ] || die "a real run takes your confirmation from a terminal, never from a pipe or a file"
+  printf 'wp-sr-promote: %s: ' "$2" >&2
+  read -r ANS || true
+  [ "$ANS" = "$1" ] || die "not confirmed"
+}
+
+# 1. The tag: one commit, locally and on origin, on origin's main.
+COMMIT=$(g rev-parse --verify --quiet "refs/tags/$TAG^{commit}") || die "no local tag $TAG (git fetch origin tag $TAG)"
+if [ -z "$DRY" ]; then
+  [[ "$(g config --get remote.origin.url)" =~ ^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)$GH_REPO(\.git)?$ ]] \
+    || die "origin is not github.com/$GH_REPO"
+fi
+g fetch --quiet --no-tags origin main
+MAINTIP=$(g rev-parse --verify FETCH_HEAD^{commit})
+REMOTE=$(g ls-remote --tags origin | awk -v t="refs/tags/$TAG" '$2 == t "^{}" { p = $1 } $2 == t { c = $1 } END { print (p != "" ? p : c) }')
+[ "$REMOTE" = "$COMMIT" ] || die "origin's $TAG is '${REMOTE:-missing}', the local one is $COMMIT"
+g merge-base --is-ancestor "$COMMIT" "$MAINTIP" || die "$TAG ($COMMIT) is not on origin/main"
+
+# 2. The key and version sites have now, and the owner's record.
+CURZIP=""; CUR=""; CURV=""; TRUSTED=""; FIRST=""
+if [ -n "$DRY" ]; then CURZIP=$TRUSTED_ZIP
+elif CUR=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name 2>"$W/gh-err"); then
+  [[ "$CUR" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "the latest release's tag is ${CUR@Q}"
+  mkdir "$W/cur"; gh release download "$CUR" --pattern puzzles-site-reports.zip --pattern manifest.json --dir "$W/cur"
+  CURZIP="$W/cur/puzzles-site-reports.zip"
+else
+  grep -q 'HTTP 404' "$W/gh-err" || { cat "$W/gh-err" >&2; die "could not read the latest release"; }
+  [ -z "$ROTATE" ] || die "--rotate, but no release was promoted yet"
+  FIRST=1
+fi
+LAST=$(g for-each-ref --sort=-version:refname --count=1 --format='%(refname)' "$REC"); LV=""
+if [ -n "$LAST" ]; then
+  LV=${LAST##*/}
+  [[ "$LV" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "${LAST@Q} is not a record this script wrote"
+  BASE=$(g rev-parse --verify "$LAST^{commit}"); BL="$LV, your last promotion recorded in this clone ($LAST)"
+else
+  BASE=$(g hash-object -t tree --stdin </dev/null); BL="none: the first promotion recorded in this clone: everything is new"
+fi
+if [ -n "$CURZIP" ]; then # read as data: one file to stdout, nothing extracted
+  CURMAIN=$(unzip -p "$CURZIP" puzzles-site-reports/puzzles-site-reports.php | tr -d '\r')
+  TRUSTED=$(pubkey_of <<<"$CURMAIN"); CURV=$(wp_header Version <<<"$CURMAIN")
+  [[ "$TRUSTED" =~ $KEY_RE && "$CURV" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "cannot read the latest release's key and version"
+fi
+if [ -n "$CUR" ]; then # a real run: the latest release is one this key signed
+  [ "$CUR" = "v$CURV" ] || die "the latest release $CUR carries version $CURV"
+  [ -f "$W/cur/manifest.json" ] || die "the latest release $CUR has no manifest.json"
+  M=$(head -c 1024 "$W/cur/manifest.json" | tr -d '\r\n')
+  MAN_RE='^[{]"version":"([0-9.]+)","sha256":"([0-9a-f]{64})","requires":"([0-9.]+)","requires_php":"([0-9.]+)","tested":"([0-9.]+)","signature":"([A-Za-z0-9+/]{86}==)"[}]$'
+  [[ "$M" =~ $MAN_RE ]] || die "$CUR's manifest.json is not one this script writes"
+  F=("${BASH_REMATCH[@]:1}")
+  [ "${F[0]}" = "$CURV" ] && [ "${F[1]}" = "$(sha256sum "$CURZIP" | cut -c1-64)" ] || die "$CUR's manifest does not match its zip"
+  KEYS=$(for r in $(g for-each-ref --format='%(refname)' "$REC" "$PEND"); do g cat-file blob "$r:puzzles-site-reports.php" | pubkey_of; done)
+  KEYS=$(echo "$TRUSTED" $KEYS) # one line: sig_ok reads the keys from its first line
+  sig_ok "$KEYS" "${F[5]}" "${F[0]}"$'\n'"${F[1]}"$'\n'"${F[2]}"$'\n'"${F[3]}"$'\n'"${F[4]}" \
+    || die "$CUR's manifest is not signed by its own key or the key of a promotion recorded in this clone"
+fi
+CURREC=""; [ -z "$CURV" ] || ! g rev-parse --quiet --verify "$REC/v$CURV" >/dev/null || CURREC=1
+if [ -n "$CUR" ] && [ -z "$CURREC" ] && g rev-parse --quiet --verify "$PEND/$CUR" >/dev/null; then
+  PC=$(g rev-parse --verify "$PEND/$CUR^{commit}")
+  echo "wp-sr-promote: GitHub's latest release, $CUR, is live and signed by your key, but the run that promoted it here stopped before recording it ($PEND/$CUR -> $PC)" >&2
+  confirm "$CURV" "type $CURV to record $CUR as promoted"
+  g update-ref -m "wp-sr-promote: recorded after an interrupted run" "$REC/$CUR" "$PC"; g update-ref -d "$PEND/$CUR"
+  if [ "$CUR" = "$TAG" ]; then echo "promoted $TAG (it was already live); recorded as $REC/$TAG: nothing left to do"
+  else echo "recorded $CUR as promoted ($REC/$CUR); run again to promote $TAG"; fi
+  exit 0
+fi
+if [ -n "$LAST" ] && { [ -n "$FIRST" ] || { [ -n "$CURV" ] && [ -z "$CURREC" ]; }; }; then
+  die "the latest release on GitHub is ${CURV:+v}${CURV:-none}, not a promotion recorded in this clone (your last: $LV): GitHub's release state does not match your record; find out why before promoting anything (README, Release)"
+fi
+[ -z "$CURV" ] || printf '%s\n' "$CURV" "$V" | sort -VCu || die "$TAG is not newer than the latest release ($CURV)"
+[ -z "$LV" ] || printf '%s\n' "${LV#v}" "$V" | sort -VCu || die "$TAG is not newer than your last promotion recorded in this clone ($LV)"
+
+# 3. The tag's shipped files, read as blobs into the staging directory, every entry checked before it is written.
+FILES=()
+S="$W/stage/puzzles-site-reports"; mkdir -p "$S"; SR=$(realpath "$S")
+PATH_RE='^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$'
+DEV_RE='/(con|prn|aux|nul|com[0-9]|lpt[0-9])(\.[^/]*)?/'
+declare -A SEEN # lowercased path -> f (a file) or d (a directory)
+mapfile -d '' ENTRIES < <(g ls-tree -r -z --full-tree "$COMMIT" -- "${SHIP[@]}")
+for e in "${ENTRIES[@]}"; do
+  p="${e#*$'\t'}"; read -r mode _ sha <<<"${e%%$'\t'*}"; l="${p,,}"
+  [[ "$p" =~ $PATH_RE ]] || die "$TAG has the path ${p@Q}"
+  [ "$mode" = 100644 ] || [ "$mode" = 100755 ] || die "$TAG has ${p@Q} with mode $mode (a symlink or a submodule)"
+  [[ ! "/$l/" =~ $DEV_RE ]] || die "$TAG's ${p@Q} has a reserved device name on Windows"
+  [[ "$p/" != *./* ]] || die "$TAG's ${p@Q} has a name ending in '.', which Windows drops"
+  [ -z "${SEEN[$l]:-}" ] || die "$TAG's ${p@Q} and another entry are one name on Windows (case-insensitive)"
+  SEEN[$l]=f; d=$l
+  while [[ "$d" == */* ]]; do
+    d=${d%/*}; [ "${SEEN[$d]:-d}" = d ] || die "$TAG's ${p@Q} and another entry are one name on Windows (case-insensitive)"
+    SEEN[$d]=d
+  done
+  mkdir -p -- "$S/$(dirname -- "$p")"
+  g cat-file blob "$sha" >"$S/$p"
+  case "$(realpath -- "$S/$p")" in "$SR"/*) ;; *) die "$TAG's ${p@Q} was written outside the staging directory" ;; esac
+  case "$p" in puzzles-site-reports.php | uninstall.php | includes/*)
+    ascii <"$S/$p" || die "$TAG's ${p@Q} has a byte other than TAB, LF and printable ASCII (a terminal control byte or a look-alike letter)" ;;
+  esac
+  FILES+=("$p")
+done
+printf '%s\0' "${FILES[@]}" | g check-attr -z --source="$COMMIT" --stdin filter ident working-tree-encoding eol >"$W/attrs" \
+  || die "git check-attr --source failed (it needs git 2.40 or later)"
+BAD=""
+while IFS= read -r -d '' p && IFS= read -r -d '' a && IFS= read -r -d '' v; do
+  case "$a=$v" in *=unspecified | *=unset | eol=lf) ;; *) BAD+=" ${p@Q}: $a=$v;" ;; esac
+done <"$W/attrs"
+[ -z "$BAD" ] || die "$TAG assigns git attributes that change a shipped file on checkout:$BAD"
+MAINF="$S/puzzles-site-reports.php"
+[ -f "$MAINF" ] || die "$TAG has no puzzles-site-reports.php"
+STRICT_V='^ \* Version: +[0-9]+\.[0-9]+\.[0-9]+$'
+STRICT_D="^define\\( 'PUZZLES_SITE_REPORTS_VERSION', '[0-9]+\\.[0-9]+\\.[0-9]+' \\);\$"
+[ "$(head -c 8192 "$MAINF" | grep -ciE '^([[:blank:]]*<\?php)?[[:blank:]/*#@]*Version:' || true)" = 1 ] \
+  && [ "$(head -c 8192 "$MAINF" | grep -iE '^([[:blank:]]*<\?php)?[[:blank:]/*#@]*Version:' | grep -cE "$STRICT_V" || true)" = 1 ] \
+  && [ "$(grep -cE "$STRICT_V" "$MAINF" || true)" = 1 ] && [ "$(grep -ciE '^[[:blank:]/*#@]*Version:' "$MAINF" || true)" = 1 ] \
+  && [ "$(grep -c "PUZZLES_SITE_REPORTS_VERSION'" "$MAINF" || true)" = 1 ] && [ "$(grep -cE "$STRICT_D" "$MAINF" || true)" = 1 ] \
+  || die "$TAG's main file needs exactly one version header line as WordPress reads it, ' * Version: X.Y.Z', and exactly one \"define( 'PUZZLES_SITE_REPORTS_VERSION', 'X.Y.Z' );\" line, and no other line like them"
+# Tripwires (header, 3). grep -a: a file grep takes for binary is still read.
+HITS=$(cd "$S" && { grep -rlia PUZZLES_SR_UPDATE_PUBKEY "${CODE[@]}" 2>/dev/null || true; })
+[ "$HITS" = puzzles-site-reports.php ] || die "PUZZLES_SR_UPDATE_PUBKEY appears outside the main file in $TAG: $(echo $HITS)"
+[ "$(grep -ciaE '(define|const)[^;]*PUZZLES_SR_UPDATE_PUBKEY' "$MAINF")" = 1 ] || die "$TAG defines PUZZLES_SR_UPDATE_PUBKEY more than once"
+CONST_RE='(^|[^A-Za-z0-9_$>:])const([^A-Za-z0-9_]|$)'
+ODD=$(cd "$S" && {
+  grep -rniaE "constant[[:space:]]*\(|PUZZLES_[A-Z0-9_]*['\"][[:space:]]*\." "${CODE[@]}" 2>/dev/null || true
+  grep -rniaE 'define[[:space:]]*\(' "${CODE[@]}" 2>/dev/null \
+    | grep -viaE "define[[:space:]]*\([[:space:]]*['\"][A-Z0-9_]+['\"][[:space:]]*," || true
+  grep -rniaE "$CONST_RE" "${CODE[@]}" 2>/dev/null | grep -viaE 'const[[:space:]]+[A-Z0-9_]+[[:space:]]*=.*;' || true
+})
+[ -z "$ODD" ] || die "$TAG's shipped PHP names a constant in a way these checks cannot follow: $ODD"
+TWICE=$(cd "$S" && { grep -rhoiaE "define[[:space:]]*\([[:space:]]*['\"][A-Z0-9_]+|$CONST_RE[[:space:]]*[A-Z0-9_]+" "${CODE[@]}" 2>/dev/null || true; } \
+  | grep -oiaE '[A-Z0-9_]+$' | tr a-z A-Z | sort | uniq -d)
+[ -z "$TWICE" ] || die "$TAG's shipped PHP defines a constant more than once: $(echo $TWICE)"
+NEWPUB=$(pubkey_of <"$MAINF")
+[[ "$NEWPUB" =~ $KEY_RE ]] || die "$TAG's PUZZLES_SR_UPDATE_PUBKEY is not one base64 Ed25519 public key: '$NEWPUB'"
+DEFL=$(grep -naE "^define\( 'PUZZLES_SR_UPDATE_PUBKEY'" "$MAINF" | cut -d: -f1)
+INCL=$(grep -naiE '^[[:space:]]*(require|include)(_once)?[[:space:](]' "$MAINF" | head -1 | cut -d: -f1)
+[ -z "$INCL" ] || [ "$DEFL" -lt "$INCL" ] || die "$TAG's main file includes a file before it defines PUZZLES_SR_UPDATE_PUBKEY"
+REQ=$(wp_header 'Requires at least' <"$MAINF"); REQPHP=$(wp_header 'Requires PHP' <"$MAINF")
+[[ "$REQ" =~ $VER_RE && "$REQPHP" =~ $VER_RE ]] || die "bad Requires header: ${REQ@Q} ${REQPHP@Q}"
+
+D=(g --no-pager diff --no-color --no-ext-diff --no-textconv --text)
+{
+  echo "wp-sr-promote: $TAG is commit $COMMIT"
+  echo "wp-sr-promote: baseline: $BL"
+  echo "wp-sr-promote: every file $TAG ships, baseline -> $TAG, in full:"
+  "${D[@]}" "$BASE" "$COMMIT" -- "${SHIP[@]}" | cat -v
+} >&2
+confirm "$V" "review the diff above, then type $V to sign $TAG"
+
+# 4. Build: scripts/build.sh's version rewrite and zip, byte for byte (tests/promote-dry-run.sh compares the two).
+sed -i -E "s/^( \* Version:) +[0-9]+\.[0-9]+\.[0-9]+\$/\1 $V/; s/^(define\( 'PUZZLES_SITE_REPORTS_VERSION', ')[0-9]+\.[0-9]+\.[0-9]+(' \);)\$/\1$V\2/" "$MAINF"
+PY=python3; "$PY" -I -c '' 2>/dev/null || PY=python # python3 may be a Windows store stub
+(cd "$W" && "$PY" -I - <<'PYEOF'
+import os, zipfile
+names = sorted(os.path.relpath(os.path.join(d, f), 'stage').replace(os.sep, '/') for d, _, fs in os.walk('stage') for f in fs)
+with zipfile.ZipFile('puzzles-site-reports.zip', 'w') as z:
+    for n in names:
+        i = zipfile.ZipInfo(n, (1980, 1, 1, 0, 0, 0))  # ZIP_STORED by default
+        i.create_system = 3                              # Unix, whatever machine builds it
+        i.external_attr = 0o100644 << 16                 # a regular file, rw-r--r--
+        with open(os.path.join('stage', n), 'rb') as f:
+            z.writestr(i, f.read())
+PYEOF
+)
+BUILT=$(sha256sum "$W/puzzles-site-reports.zip" | cut -c1-64)
+if [ -n "$DRY" ]; then ZIP=$DRY
+else mkdir "$W/rel"; gh release download "$TAG" --pattern puzzles-site-reports.zip --dir "$W/rel"; ZIP="$W/rel/puzzles-site-reports.zip"; fi
+SHA=$(sha256sum "$ZIP" | cut -c1-64)
+[ "$SHA" = "$BUILT" ] || die "the release zip (sha256 $SHA) is not what this launcher builds from $TAG ($BUILT). If the tag's scripts/build.sh changed the zip's bytes, this launcher needs the same change: review it and re-install (README, Release)"
+
+# Sign. stdin: the key, the new key (or an empty line), then the message exactly. Prints "<pub> <new pub or -> <sig>".
+[ -z "$FIRST" ] || TRUSTED=$NEWPUB
+MSG="$V"$'\n'"$SHA"$'\n'"$REQ"$'\n'"$REQPHP"$'\n'"$TESTED"
+OUT=$(printf '%s\n%s\n%s' "$KEY" "$NEWKEY" "$MSG" | php_run -r '
+$sk = function ( $line ) {
+	$k = base64_decode( trim( (string) $line ), true );
+	if ( ! is_string( $k ) || SODIUM_CRYPTO_SIGN_SECRETKEYBYTES !== strlen( $k ) ) { fwrite( STDERR, "not a base64 Ed25519 secret key\n" ); exit( 1 ); }
+	return $k;
+};
+$k = $sk( fgets( STDIN ) );
+$n = trim( (string) fgets( STDIN ) );
+$np = "" === $n ? "-" : base64_encode( sodium_crypto_sign_publickey_from_secretkey( $sk( $n ) ) );
+echo base64_encode( sodium_crypto_sign_publickey_from_secretkey( $k ) ), " ", $np, " ", base64_encode( sodium_crypto_sign_detached( stream_get_contents( STDIN ), $k ) );
+' | tr -d '\r')
+read -r PUB PROOF SIG <<<"$OUT"
+[[ "$PUB" =~ $KEY_RE && "$SIG" =~ ^[A-Za-z0-9+/]{86}==$ ]] || die "signing failed"
+if [ -n "$ROTATE" ]; then
+  [ "$PROOF" = "$NEWPUB" ] || die "$NKV is not the secret key of $TAG's PUZZLES_SR_UPDATE_PUBKEY ($NEWPUB)"
+fi
+if [ -n "$TRUSTED" ]; then
+  [ "$PUB" = "$TRUSTED" ] || die "the signing key's public key ($PUB) is not the one sites trust now ($TRUSTED)"
+  if [ -n "$ROTATE" ]; then
+    [ "$NEWPUB" != "$TRUSTED" ] || die "--rotate, but $TAG keeps the key sites trust now"
+    echo "wp-sr-promote: rotating: after $TAG, sites trust only $NEWPUB" >&2
+  else
+    [ "$NEWPUB" = "$TRUSTED" ] || die "$TAG changes the release key to $NEWPUB; pass --rotate (with $NKV) if that is intended"
+  fi
+else
+  echo "wp-sr-promote: dry run without --trusted-zip: the key, version and record checks are skipped" >&2
+fi
+if [ -n "$DRY" ]; then # every release key the clone's HEAD history carried, read from each commit's main file
+  KNOWN=$(for c in $(g rev-list HEAD -- puzzles-site-reports.php); do
+    g cat-file blob "$c:puzzles-site-reports.php" 2>/dev/null | pubkey_of || true # a commit that deletes it has none
+  done)
+  ! grep -qxF -- "$PUB" <<<"$KNOWN" || die "dry run with a release key: use a throwaway key (wp-sr-promote keygen)"
+fi
+
+printf '{"version":"%s","sha256":"%s","requires":"%s","requires_php":"%s","tested":"%s","signature":"%s"}\n' \
+  "$V" "$SHA" "$REQ" "$REQPHP" "$TESTED" "$SIG" >"$W/manifest.json"
+if [ -n "$DRY" ]; then cat "$W/manifest.json"; g update-ref -m "wp-sr-promote --dry-run" "$REC/$TAG" "$COMMIT"; exit 0; fi
+g update-ref -m "wp-sr-promote: going live" "$PEND/$TAG" "$COMMIT" # a run stopped after the edit below is recoverable (2)
+gh release upload "$TAG" "$W/manifest.json" --clobber
+gh release edit "$TAG" --prerelease=false --latest
+g update-ref -m "wp-sr-promote" "$REC/$TAG" "$COMMIT"; g update-ref -d "$PEND/$TAG" # the record: local only, never pushed
+echo "promoted $TAG (sha256 $SHA); recorded as $REC/$TAG"

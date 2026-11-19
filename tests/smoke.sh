@@ -51,7 +51,7 @@ add_filter( "http_request_host_is_external", function ( $ok, $host ) { return "w
 
 /**
  * Writes the manifest the update check reads, signed with $kp (a base64 keypair; none when empty) over its five fields
- * joined by "\n", as scripts/promote.sh signs. $signed overrides fields before signing, $extra after.
+ * joined by "\n", as scripts/wp-sr-promote signs. $signed overrides fields before signing, $extra after.
  */
 function puzzles_sr_test_manifest( $version, $sha, $kp, array $extra = array(), array $signed = array() ) {
 	$m = array_merge( array( "version" => $version, "sha256" => $sha, "requires" => "5.8", "requires_php" => "7.4", "tested" => "6.9" ), $signed );
