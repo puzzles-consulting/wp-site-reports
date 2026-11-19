@@ -17,8 +17,7 @@ the stack down on exit (`docker compose down -v`), also on failure: never leave 
 Bash `smoke.sh` exports `MSYS_NO_PATHCONV=1`. `promote-dry-run.sh` runs the promoter, `scripts/wp-sr-promote`, against
 a throwaway origin, keys and a stand-in for `gh`, and checks that its zip is byte for byte `build.sh`'s; its real-path
 section needs `script(1)` for a terminal, so it is skipped in Git Bash and runs in CI (with `$CI` set, a missing
-`script(1)` fails the test). CI (`.github/workflows/ci.yml`) runs `php -l` on 7.4 to 8.4 plus both tests. Shipped files
-other than PHP must never hold `<?` (the promoter refuses them).
+`script(1)` fails the test). CI (`.github/workflows/ci.yml`) runs `php -l` on 7.4 to 8.4 plus both tests.
 
 ## Hard rules
 
@@ -32,6 +31,10 @@ other than PHP must never hold `<?` (the promoter refuses them).
 5. A new behaviour gets a `case_*` function in `tests/smoke.sh` first; cases run in the order of the
    `CASES` list at the bottom of that file (a defined case missing from it, or a listed one that is
    undefined, fails the run).
+6. Every shipped file (the main file, `uninstall.php`, `includes/`, README, CHANGELOG, LICENSE) is plain ASCII (TAB,
+   LF, printable), and only PHP files hold `<?`. In the main file, nothing but the header comment, blank lines, `//`
+   comments, the ABSPATH guard and literal `define( 'NAME', 'value' );` lines comes before the one-line
+   `define( 'PUZZLES_SR_UPDATE_PUBKEY', '...' );`. The promoter refuses a release that breaks either.
 
 ## Pointers
 
