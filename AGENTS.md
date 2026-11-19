@@ -32,10 +32,9 @@ a stand-in for `gh` (its real-path section needs `script(1)`: skipped in Git Bas
    undefined, fails the run).
 6. Every shipped file (the main file, `uninstall.php`, `includes/`, README, CHANGELOG, LICENSE) is plain ASCII (TAB,
    LF, printable), and only PHP files hold `<?` (`build.sh` and the promoter refuse anything else). In the main file,
-   only these exact lines come before the one-line `define( 'PUZZLES_SR_UPDATE_PUBKEY', '...' );`: `<?php`, the
-   header comment (no `*/` but its closing ` */`), blank lines, `//` comments without `?>`, the three-line ABSPATH
-   guard as it is, and `define( 'NAME', 'literal' );` or `define( 'NAME', 123 );` for any name but the key's. No
-   indentation, trailing whitespace or trailing comments on them.
+   only the exact lines the promoter's header allows (step 3) come before the one-line
+   `define( 'PUZZLES_SR_UPDATE_PUBKEY', '...' );`: no indentation, trailing whitespace or trailing comments on define
+   lines.
 
 ## Pointers
 

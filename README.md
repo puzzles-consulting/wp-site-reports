@@ -80,22 +80,22 @@ refuses those releases.
 
 The record. Each promotion prints the tag's commit and the zip's sha256 (keep both) and writes them to a local ref in
 the clone it ran in, `refs/puzzles-sr/promoted/vX.Y.Z`: your statement of what you signed. GitHub's latest release must
-be one you recorded, with that sha256, and the highest record is the baseline of the next review. Never push it or
-fetch into it. Keep one promotion clone (`--repo` is its top folder) and always promote from it;
+be one you recorded, with that sha256, and the highest record is the baseline of the next review. Never push the
+records, and never configure a refspec that writes them. Keep one promotion clone (`--repo` is its top folder) and always promote from it;
 `git -C <clone> fetch origin` is all it needs. Dry runs go in throwaway clones: the promoter refuses a dry run in a
 clone with a real record, and a real run in a clone with dry-run records.
 
 - Another clone or machine: copy the records from the clone that has them:
-  `git -C <new clone> fetch <old clone> 'refs/puzzles-sr/promoted/*:refs/puzzles-sr/promoted/*'` (a one-off command,
-  never a configured refspec).
+  `git -C <new clone> fetch <old clone> 'refs/puzzles-sr/*:refs/puzzles-sr/*'` (a one-off command: it copies the
+  records, any pending one and the commits they hold).
   If the old clone is lost, record GitHub's latest release (and your highest promotion, if it is another one) with the
   values its promotion printed: `bash ~/bin/wp-sr-promote record --repo <clone> vX.Y.Z <commit> <zip sha256>`. It
   checks that GitHub's zip has that sha256 and holds that commit's files.
 - Bad release: `gh release edit vX.Y.Z --prerelease` stops the spread, and GitHub's latest falls back to an earlier
   release you recorded. Sites already on it are fixed only by rolling forward to `X.Y.Z+1`, promoted as usual. Never
-  mark a key-rotation release pre-release (sites on it trust only the new key): fix forward with the new key. If
-  something else went wrong (your first promotion marked pre-release, an interrupted run), the promoter tells you how
-  to restore.
+  mark a key-rotation release pre-release (sites on it trust only the new key): fix forward with the new key. If your
+  first promotion is the bad one, nothing is latest any more; the next promotion takes its key from your record.
+  After an interrupted run, the promoter tells you what to do.
 
 Branch protection on `main` and restricting who can create `v*` tags on GitHub are still recommended: they are
 repository settings, the owner's decision.
