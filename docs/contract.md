@@ -11,4 +11,35 @@ Every route under `/wp-json/puzzles-reports/v1/` (or `?rest_route=/puzzles-repor
 - Any unexpected failure while building a report: HTTP 500, code `puzzles_reports_failed`, message `The report could not be built.`
 - Connection string: `pzr1.` + base64url, no padding, of `{"site": "<home_url>", "token": "<64 hex>"}`. Creating a connection (Tools > Site Reports, or `wp puzzles-site-reports connect --porcelain`) rotates the token: the previous one stops working at once. The site stores only the SHA-256 hash and the creation time in the option `puzzles_site_reports_token`.
 - `wp puzzles-site-reports status` prints the version and whether a connection exists; it never prints the token.
-- The routes answer to the token alone, even when another plugin or snippet refuses every unauthenticated REST request: the plugin lets a request through that check only when it is for this namespace and carries a valid token.
+- The routes answer to the token alone, even when another plugin or snippet refuses unauthenticated REST requests through `rest_authentication_errors`: the plugin lets a request through that check only when it is for this namespace and carries a valid token.
+
+## GET /status
+
+Reads what WordPress already knows. It never triggers an update check or a Wordfence scan, and it does not depend on who the current user is.
+
+```json
+{
+  "companion": { "version": "1.0.0" },
+  "wordpress": { "version": "6.7.1", "update": "6.8", "updatesCheckedAt": "2026-11-18T03:12:00Z" },
+  "php": { "version": "8.2.12" },
+  "plugins": [
+    { "file": "wordfence/wordfence.php", "name": "Wordfence Security", "version": "8.0.1",
+      "active": true, "update": "8.0.3", "autoUpdate": false }
+  ],
+  "mustUse": [ { "file": "lighthouse.php", "name": "...", "version": "..." } ],
+  "themes": [ { "stylesheet": "astra-child", "name": "Astra Child", "version": "1.0", "active": true,
+                "parent": "astra", "update": null } ],
+  "wordfence": { "version": "8.0.1", "active": true, "lastScanAt": "2026-11-17T09:00:00Z",
+                 "issues": [ { "type": "wfPluginUpgrade", "severity": 75, "shortMsg": "...", "firstSeenAt": "2026-11-16T09:00:00Z" } ],
+                 "ignored": 3 },
+  "comments": { "defaultStatus": "closed" }
+}
+```
+
+- `update` (core, plugins, themes) is the version WordPress' own update data offers, or `null` for none.
+- `updatesCheckedAt` is the oldest of the last checks of WordPress' three update transients (core, plugins, themes), in UTC (`...Z`). It is `null` when any of the three never ran; then every `update` means "unknown", never "up to date". The plugin never triggers an update check.
+- `active` is a boolean; a network-active plugin counts as active. `autoUpdate` is true when the plugin is in WordPress' auto-update list.
+- `mustUse` carries only `file`, `name` and `version`. A theme's `parent` is its parent's stylesheet, `null` when it has none; `active` is the stylesheet in use.
+- `wordfence` is `null` when Wordfence is not installed (also when reading it fails). When it is installed but inactive, `active` is `false`, `issues` is `[]`, `ignored` is `0` and `lastScanAt` is `null`: its classes are not loaded. Otherwise `issues` are Wordfence's open (status `new`) scan results through its own `wfIssues` class, at most 200, ordered as Wordfence orders them (severity, highest first). `severity` is the integer Wordfence stores (100 critical, 75 high, 50 medium, 25 low). `shortMsg` is cut to 300 characters. `firstSeenAt` is when Wordfence first stored the issue. Wordfence's per-issue `data` is never returned. `ignored` counts the ignored issues. `lastScanAt` is Wordfence's own last-scan time, `null` if it never scanned. The plugin never starts a scan.
+- `comments.defaultStatus` is the site's `default_comment_status` (`open` or `closed`).
+- No server path, database name, table prefix or token appears in the response.

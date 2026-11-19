@@ -21,6 +21,8 @@ define( 'PUZZLES_SITE_REPORTS_VERSION', '0.0.0-dev' );
 define( 'PUZZLES_SITE_REPORTS_OPTION', 'puzzles_site_reports_token' );
 define( 'PUZZLES_SITE_REPORTS_NAMESPACE', 'puzzles-reports/v1' );
 
+require_once __DIR__ . '/includes/status.php';
+
 /** Rotates the token. Returns the connection string, or a WP_Error if it could not be stored. Only the SHA-256 hash is stored. */
 function psr_create_connection() {
 	$token = bin2hex( random_bytes( 32 ) );
@@ -139,10 +141,7 @@ add_filter(
 add_action(
 	'rest_api_init',
 	function () {
-		// Until the status report lands this answers {}.
-		psr_register_route( '/status', function () {
-			return (object) array();
-		} );
+		psr_register_route( '/status', 'psr_status' );
 	}
 );
 

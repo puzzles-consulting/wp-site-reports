@@ -34,7 +34,7 @@ done
 curl -fs -o /dev/null http://localhost:8080/
 
 # Git Bash on Windows ships no jq: run it from an image (stdin, or files under out/).
-command -v jq >/dev/null || jq() { docker run -i --rm -v "$(pwd -W 2>/dev/null || pwd)/out:/w/out" -w /w ghcr.io/jqlang/jq:1.7.1 "$@"; }
+command -v jq >/dev/null || jq() { docker run -i --rm -e EXPECTED_VERSION -v "$(pwd -W 2>/dev/null || pwd)/out:/w/out" -w /w ghcr.io/jqlang/jq:1.7.1 "$@"; }
 
 base64url_decode() { # stdin -> stdout; re-pads and maps -_ to +/
   local s; s=$(tr -d '\r\n' | tr '_-' '/+')
@@ -91,11 +91,53 @@ case_auth_locked_rest() { # another plugin refuses every unauthenticated REST re
   wpcli eval "unlink( WPMU_PLUGIN_DIR . '/psr-lock.php' );"
 }
 
+case_status_fresh() { # no update check has run yet: delete the three transients to force that state
+  for t in update_core update_plugins update_themes; do wpcli transient delete "$t" --network >/dev/null 2>&1 || true; done
+  t=$(token_of "$(connect)"); [ "$(call status "$t")" = 200 ]
+  jq -e '.companion.version == env.EXPECTED_VERSION' out/status.json
+  jq -e '.wordpress.updatesCheckedAt == null and ([.plugins[].update] | all(. == null))' out/status.json
+  jq -e '.php.version | test("^8\\.3\\.")' out/status.json
+  jq -e '.plugins[] | select(.file == "puzzles-site-reports/puzzles-site-reports.php") | .active == true' out/status.json
+  jq -e '.wordfence == null and .comments.defaultStatus == "open"' out/status.json
+  ! grep -q '/var/www' out/status.json || return 1
+}
+
+case_status_wordfence_and_updates() {
+  wpcli plugin install wordfence --activate
+  wpcli plugin install akismet --version=5.0 --force
+  wpcli plugin deactivate akismet || true
+  wpcli theme install twentytwentyone --version=1.0 --force
+  for t in update_core update_plugins update_themes; do wpcli transient delete "$t" --network >/dev/null 2>&1 || true; done
+  wpcli eval 'wp_update_plugins(); wp_update_themes(); wp_version_check();'
+  wpcli option update default_comment_status closed
+  # No scan is run (too heavy): seed Wordfence's own store through its public API instead, so the reading path runs for real.
+  # Issue 1 is open (long message, a path in its private data; Wordfence itself keeps shortMsg to 255), issue 2 is ignored.
+  wpcli eval '
+    $i = wfIssues::shared();
+    $i->addIssue( "wfPluginUpgrade", 75, "a", "a", str_repeat( "m", 400 ), "long", array( "secret" => "/var/www/html/private-data" ) );
+    $i->addIssue( "wfThemeUpgrade", 50, "b", "b", "ignored one", "long", array() );
+    $i->updateIssue( 2, "ignoreP" );
+    wfScanner::shared()->recordLastScanTime();'
+  t=$(token_of "$(connect)"); [ "$(call status "$t")" = 200 ]
+  jq -e '.wordfence.ignored == 1 and (.wordfence.lastScanAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$"))' out/status.json
+  jq -e '.wordfence.issues | length == 1 and .[0].type == "wfPluginUpgrade" and .[0].severity == 75 and (.[0].shortMsg | length) <= 300 and (.[0].shortMsg | length) > 0 and (.[0].firstSeenAt | type == "string") and (.[0] | keys | sort) == ["firstSeenAt","severity","shortMsg","type"]' out/status.json
+  ! grep -q 'private-data' out/status.json || return 1                  # Wordfence's per-issue data never leaves
+  jq -e '.wordpress.updatesCheckedAt != null' out/status.json
+  jq -e '.plugins[] | select(.file == "akismet/akismet.php") | .active == false and .version == "5.0" and (.update | type == "string")' out/status.json
+  jq -e '.themes[] | select(.stylesheet == "twentytwentyone") | (.update | type == "string") and .active == false' out/status.json
+  jq -e '.wordfence.active == true and (.wordfence.issues | type == "array") and (.wordfence | has("lastScanAt"))' out/status.json
+  jq -e '.comments.defaultStatus == "closed"' out/status.json
+  jq -e '(.wordfence | keys | sort) == ["active","ignored","issues","lastScanAt","version"]' out/status.json
+  ! grep -q '/var/www' out/status.json || return 1
+  wpcli plugin deactivate wordfence
+  [ "$(call status "$t")" = 200 ]
+  jq -e '.wordfence.active == false' out/status.json # installed but inactive: still reported, no fatal
+}
+
 # Fixed order (Task rulings). A new case is added to BOTH the function list and this one;
 # the check below fails on any mismatch, so a case can never be silently skipped.
-CASES=(case_plugin_active case_auth case_auth_locked_rest)
-# add, in this order, as their tasks land: case_status_fresh case_status_wordfence_and_updates
-#   case_seo_without_rank_math case_seo_with_rank_math case_update_offer
+CASES=(case_plugin_active case_auth case_auth_locked_rest case_status_fresh case_status_wordfence_and_updates)
+# add, in this order, as their tasks land: case_seo_without_rank_math case_seo_with_rank_math case_update_offer
 
 for c in "${CASES[@]}"; do
   declare -F "$c" >/dev/null || { echo "FAIL: listed case $c is not defined" >&2; exit 1; }
