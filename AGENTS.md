@@ -33,8 +33,9 @@ a stand-in for `gh` (its real-path section needs `script(1)`: skipped in Git Bas
 6. Every shipped file (the main file, `uninstall.php`, `includes/`, README, CHANGELOG, LICENSE) is plain ASCII (TAB,
    LF, printable), and only PHP files hold `<?` (`build.sh` and the promoter refuse anything else). In the main file,
    only the exact lines the promoter's header allows (step 3) come before the one-line
-   `define( 'PUZZLES_SR_UPDATE_PUBKEY', '...' );`: no indentation, trailing whitespace or trailing comments on define
-   lines.
+   `define( 'PUZZLES_SR_UPDATE_PUBKEY', '...' );`: no `*/` inside the header comment but its closing ` */`, no `?>` in a
+   `//` comment, the ABSPATH guard exactly as written, and no indentation, trailing whitespace or trailing comments on
+   define lines.
 
 ## Pointers
 

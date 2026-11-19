@@ -93,8 +93,8 @@ clone with a real record, and a real run in a clone with dry-run records.
   checks that GitHub's zip has that sha256 and holds that commit's files.
 - Bad release: `gh release edit vX.Y.Z --prerelease` stops the spread, and GitHub's latest falls back to an earlier
   release you recorded. Sites already on it are fixed only by rolling forward to `X.Y.Z+1`, promoted as usual. Never
-  mark a key-rotation release pre-release (sites on it trust only the new key): fix forward with the new key. If your
-  first promotion is the bad one, nothing is latest any more; the next promotion takes its key from your record.
+  mark a key-rotation release pre-release (sites on it trust only the new key): fix forward with the new key. A bad
+  first promotion leaves nothing latest; the next one takes its key from your record.
   After an interrupted run, the promoter tells you what to do.
 
 Branch protection on `main` and restricting who can create `v*` tags on GitHub are still recommended: they are
