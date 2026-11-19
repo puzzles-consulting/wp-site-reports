@@ -182,7 +182,7 @@ define( 'PUZZLES_SITE_REPORTS_MANIFEST_URL', 'https://github.com/puzzles-consult
 define( 'PUZZLES_SITE_REPORTS_PACKAGE_PREFIX', 'https://github.com/puzzles-consulting/wp-site-reports/releases/download/' );
 // Base64 Ed25519 public key of the release signing key (created 2026-11-19; the secret key is held outside GitHub).
 // A new key means a release that ships the new public key, signed with the old one (README, Release).
-define( 'PUZZLES_SR_UPDATE_PUBKEY', 'x+RJSe516KyRf6lm8ooy1VgB3on7C/zYDjvYEoPgBBQ=' );
+define( 'PUZZLES_SR_UPDATE_PUBKEY', 'FRx/KzeXTPzD6VBigvVottDDryTawD19IRq0FQ8uMXc=' );
 
 /** The release asset of a version. The prefix filter is test-only (the smoke serves its own releases). */
 function puzzles_sr_package_url( string $version ): string {
