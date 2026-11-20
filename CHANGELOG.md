@@ -4,6 +4,17 @@ All notable changes to this plugin are documented here. Format: [Keep a Changelo
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-11-20
+
+### Fixed
+
+- `updatesCheckedAt` and `wordpress.updatesCheckedAt` stayed `null` on sites whose host answers WordPress' update checks
+  from a mirror through `pre_http_request` (WP Engine): a mirror's answer handed to WordPress' own check now counts.
+- A request another plugin makes from inside WordPress' update check no longer counts as the check's answer, whatever
+  HTTP wrapper it uses.
+- `/status` reports `autoUpdate: true` for this plugin's own row: it always installs its own signed updates.
+- An update offered with a leading `v` (`v2.1`) is no longer hidden; it is reported as offered.
+
 ## [1.0.2] - 2026-11-20
 
 No change in behaviour: a release to confirm that sites on 1.0.1 update automatically.

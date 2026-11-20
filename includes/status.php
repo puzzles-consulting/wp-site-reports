@@ -55,9 +55,9 @@ function puzzles_sr_offer_versions( string $type, $t ): array {
 	return $out;
 }
 
-/** An offered version only when it is above the installed one (contract). */
+/** An offered version, as given, only when it is above the installed one; a leading "v" is not compared (contract). */
 function puzzles_sr_newer( ?string $offer, string $installed ): ?string {
-	return null !== $offer && version_compare( $offer, $installed, '>' ) ? $offer : null;
+	return null !== $offer && version_compare( preg_replace( '/^v/i', '', $offer ), $installed, '>' ) ? $offer : null;
 }
 
 /**
@@ -167,9 +167,10 @@ function puzzles_sr_status(): array {
 		}
 	}
 
-	$all  = get_plugins();
-	$auto = (array) get_site_option( 'auto_update_plugins', array() );
-	$list = array();
+	$all    = get_plugins();
+	$auto   = (array) get_site_option( 'auto_update_plugins', array() );
+	$auto[] = plugin_basename( dirname( __DIR__ ) . '/puzzles-site-reports.php' ); // it always installs its own signed updates
+	$list   = array();
 	foreach ( $all as $file => $p ) {
 		$list[] = array(
 			'file'       => (string) $file,
