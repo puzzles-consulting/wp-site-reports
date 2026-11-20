@@ -22,8 +22,9 @@ weekly too). It fails on any PHP warning, notice or deprecation the plugin's fil
 1. **PHP 7.4 syntax only**: no enums, `match`, named arguments, `readonly`, union types or `?->`.
 2. **Read-only: never add a write route.** Routes are `GET` only, `show_in_index => false`,
    `Cache-Control: no-store`, never page-cached.
-3. Loading the main file only adds hooks. Nothing runs on a front-end request, no cron, no option
-   other than `puzzles_site_reports_token` (SHA-256 hex of the token, autoload off).
+3. Loading the main file only adds hooks. Outside its routes only cheap filters run (on outgoing HTTP responses and
+   update-transient saves); no cron, no option other than `puzzles_site_reports_token` (SHA-256 hex of the token,
+   autoload off).
 4. Responses never contain server paths, database names, table prefixes, the token or Wordfence's
    per-issue `data`. One fixed 401 (`puzzles_reports_unauthorized`) for every auth failure.
 5. A new behaviour gets a `case_*` function in `tests/smoke.sh` first.

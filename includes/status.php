@@ -13,22 +13,29 @@ function puzzles_sr_iso( $ts ): ?string {
 	return is_numeric( $ts ) && $ts > 0 ? gmdate( 'Y-m-d\TH:i:s\Z', (int) $ts ) : null;
 }
 
-/**
- * When the named update checks last got a real answer from api.wordpress.org (the oldest of them), or null when one never
- * did since its transient was last rebuilt: the `puzzles_sr_checked` time the plugin stamps on the transient core saves
- * ("Update-check freshness" in the main file). Read as stored, past the site_transient_* filters, through which an
- * update disabler or a third-party updater can answer anything.
- */
+/** A site transient as stored, past the site_transient_* filters (contract: updatesCheckedAt). */
+function puzzles_sr_raw_transient( string $name ) {
+	return wp_using_ext_object_cache() ? wp_cache_get( $name, 'site-transient' ) : get_site_option( '_site_transient_' . $name );
+}
+
+/** The oldest `puzzles_sr_checked` of the named transients as stored, or null (contract: updatesCheckedAt). */
 function puzzles_sr_checked_at( string ...$names ): ?string {
 	$times = array();
 	foreach ( $names as $n ) {
-		$t = wp_using_ext_object_cache() ? wp_cache_get( $n, 'site-transient' ) : get_site_option( '_site_transient_' . $n );
+		$t = puzzles_sr_raw_transient( $n );
 		if ( ! is_object( $t ) || empty( $t->puzzles_sr_checked ) ) {
 			return null;
 		}
 		$times[] = (int) $t->puzzles_sr_checked;
 	}
 	return puzzles_sr_iso( min( $times ) );
+}
+
+/** A transient's offers as stored, plus any its filters add (a filter can add an offer, never hide one: contract). */
+function puzzles_sr_offers( string $name, string $field ): array {
+	$raw      = (array) ( puzzles_sr_raw_transient( $name )->$field ?? array() );
+	$filtered = (array) ( get_site_transient( $name )->$field ?? array() );
+	return 'updates' === $field ? array_merge( $raw, $filtered ) : $raw + $filtered; // core's is a list, the others keyed by file
 }
 
 /**
@@ -109,14 +116,11 @@ function puzzles_sr_wordfence( array $plugins ): ?array {
 }
 
 function puzzles_sr_status(): array {
-	$core_t       = get_site_transient( 'update_core' );
-	$plugins_t    = get_site_transient( 'update_plugins' );
-	$themes_t     = get_site_transient( 'update_themes' );
-	$plugin_offer = $plugins_t->response ?? array();
-	$theme_offer  = $themes_t->response ?? array();
+	$plugin_offer = puzzles_sr_offers( 'update_plugins', 'response' );
+	$theme_offer  = puzzles_sr_offers( 'update_themes', 'response' );
 
 	$core_update = null;
-	foreach ( is_array( $core_t->updates ?? null ) ? $core_t->updates : array() as $offer ) { // the first real upgrade offer, wherever it sits in the list
+	foreach ( puzzles_sr_offers( 'update_core', 'updates' ) as $offer ) { // the first real upgrade offer, wherever it sits in the list
 		$version = is_object( $offer ) && 'upgrade' === ( $offer->response ?? null ) ? ( $offer->current ?? $offer->version ?? null ) : null;
 		if ( is_string( $version ) && '' !== $version ) {
 			$core_update = $version;
