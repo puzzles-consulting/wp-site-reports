@@ -90,7 +90,7 @@ add_filter( "pre_http_request", function ( $pre, $args, $url ) {
 	if ( false !== $pre || ! is_array( $a ) || ! preg_match( "~^https?://api[.]wordpress[.]org/(plugins|themes|core)/(update|version)-check/~", $url ) ) {
 		return $pre;
 	}
-	$r = array( "headers" => array(), "body" => $a["body"], "response" => array( "code" => (int) $a["code"], "message" => "" ), "cookies" => array(), "filename" => null );
+	$r = array( "headers" => array(), "body" => $a["body"], "response" => array( "code" => $a["code"], "message" => "" ), "cookies" => array(), "filename" => null );
 	do_action( "http_api_debug", $r, "response", "Requests", $args, $url );
 	return $r;
 }, 10, 3 );'
@@ -238,8 +238,12 @@ case_status_fresh() { # no update check has run yet, then only failed ones
   jq -e '.companion.version == env.EXPECTED_VERSION' out/status.json
   jq -e '.wordpress.updatesCheckedAt == null and .updatesCheckedAt == null and ([.plugins[].update] | all(. == null))' out/status.json
   jq -e --arg v "${EXPECT_PHP:-8.3}" '.php.version | startswith($v + ".")' out/status.json
-  # active, and auto-update on: it installs its own signed updates whatever WordPress' auto-update list says
+  # active, and auto-update on: it installs its own signed updates whatever WordPress' auto-update list says...
   jq -e '.plugins[] | select(.file == "puzzles-site-reports/puzzles-site-reports.php") | .active == true and .autoUpdate == true' out/status.json
+  # ...unless WordPress' automatic updater cannot run
+  put_mu psr-noauto.php '<?php add_filter( "automatic_updater_disabled", "__return_true" );'
+  st '.plugins[] | select(.file == "puzzles-site-reports/puzzles-site-reports.php") | .autoUpdate == false'
+  rm_mu psr-noauto.php
   jq -e '.wordfence == null and .comments.defaultStatus == "open"' out/status.json
   ! grep -q '/var/www' out/status.json || return 1
   # checks that fail (api.wordpress.org unreachable) stamp last_checked but store nothing: still unknown
@@ -271,6 +275,8 @@ case_status_check_stamp() { # the stamp: core's own check answered by api.wordpr
   o=$(stamp_after 200 'not json' plugins); [ "$o" = 0 ]
   o=$(stamp_after 200 '{"translations":[]}' core); [ "$o" = 0 ] # not the key it expects (offers)
   o=$(stamp_after 500 "$P_ANSWER" plugins); [ "$o" = 0 ]
+  # "200" as a string: core's check refuses it (strict 200), so it is no answer, even for a later save
+  o=$(answer '"200"' "$P_ANSWER" "delete_site_transient( 'update_plugins' ); wp_update_plugins(); set_site_transient( 'update_plugins', get_site_transient( 'update_plugins' ) ); $(stamped update_plugins)"); [ "$o" = 0 ]
   # the same answer to a request core's check did not make (another plugin asking the API itself): no stamp
   o=$(answer 200 "$P_ANSWER" "delete_site_transient( 'update_plugins' ); wp_remote_post( 'https://api.wordpress.org/plugins/update-check/1.1/' ); set_site_transient( 'update_plugins', (object) array( 'last_checked' => time() ) ); $(stamped update_plugins)"); [ "$o" = 0 ]
   # the same answer to a request another plugin makes from inside core's check (core's own request then fails): the
@@ -327,12 +333,30 @@ add_filter( "pre_http_request", function ( $pre, $args, $url ) {
   st '.updatesCheckedAt == null'
   # the mirror's answer to another plugin's request, outside core's check: no stamp
   o=$(via "$ok" "delete_site_transient( 'update_plugins' ); wp_remote_post( 'https://api.wordpress.org/plugins/update-check/1.1/' ); set_site_transient( 'update_plugins', (object) array( 'last_checked' => time() ) ); $(stamped update_plugins)"); [ "$o" = 0 ]
-  # an update disabler handing core's check a canned 200 with the key it expects, no request made: no answer
+  # no mirror: core makes the real request itself ($pre stays false) and its transport is pointed at this stack's mirror
+  # (requests-requests.before_request) while WordPress keeps api.wordpress.org as the URL: only http_api_debug sees it
+  put_mu psr-transport.php '<?php
+add_action( "requests-requests.before_request", function ( &$url ) {
+	if ( ! empty( $GLOBALS["psr_transport"] ) && preg_match( "~^https?://api[.]wordpress[.]org/plugins/update-check/~", $url ) ) {
+		$url = $GLOBALS["psr_transport"];
+	}
+}, 10, 5 );
+add_filter( "pre_http_request", function ( $pre, $args, $url ) {
+	if ( preg_match( "~^https?://api[.]wordpress[.]org/plugins/update-check/~", $url ) ) {
+		$GLOBALS["psr_pre_false"] = false === $pre;
+	}
+	return $pre;
+}, PHP_INT_MAX, 3 );'
+  o=$(wpcli eval "\$GLOBALS['psr_transport'] = '$ok'; delete_site_transient( 'update_plugins' ); wp_update_plugins(); $(stamped update_plugins) echo (int) \$GLOBALS['psr_pre_false'];" | tr -d '\r\n'); [ "$o" = 11 ]
+  rm_mu psr-transport.php
+  # an update disabler handing core's check a canned 200 with the key it expects (priority 20, whatever came before):
+  # no answer, alone or replacing the mirror's real one
   put_mu psr-canned.php '<?php add_filter( "pre_http_request", function ( $pre, $args, $url ) {
-	return false === $pre && preg_match( "~^https?://api[.]wordpress[.]org/plugins/update-check/~", $url )
+	return preg_match( "~^https?://api[.]wordpress[.]org/plugins/update-check/~", $url )
 		? array( "headers" => array(), "body" => "{\"plugins\":{},\"translations\":[],\"no_update\":[]}", "response" => array( "code" => 200, "message" => "OK" ), "cookies" => array(), "filename" => null ) : $pre;
-}, 10, 3 );'
+}, 20, 3 );'
   o=$(wpcli eval "delete_site_transient( 'update_plugins' ); wp_update_plugins(); $(stamped update_plugins)" | tr -d '\r\n'); [ "$o" = 0 ]
+  o=$(via "$ok" "delete_site_transient( 'update_plugins' ); wp_update_plugins(); $(stamped update_plugins)"); [ "$o" = 0 ]
   rm_mu psr-canned.php; rm_mu psr-wpe.php; wpcli eval 'unlink( ABSPATH . "psr-mirror.php" );'; delete_update_transients
 }
 

@@ -22,7 +22,7 @@ weekly too). It fails on any PHP warning, notice or deprecation the plugin's fil
 1. **PHP 7.4 syntax only**: no enums, `match`, named arguments, `readonly`, union types or `?->`.
 2. **Read-only: never add a write route.** Routes are `GET` only, `show_in_index => false`,
    `Cache-Control: no-store`, never page-cached.
-3. Loading the main file only adds hooks. Outside its routes only cheap ones run: outgoing HTTP responses,
+3. Loading the main file only adds hooks. Outside its routes only cheap ones run: outgoing HTTP requests and responses,
    update-transient saves, REST authentication and headers, and WordPress' own update runs (offer, download,
    auto-update, email). No cron, no option other than `puzzles_site_reports_token` (SHA-256 hex, autoload off).
 4. Responses never contain server paths, database names, table prefixes, the token or Wordfence's
