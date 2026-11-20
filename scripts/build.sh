@@ -35,7 +35,8 @@ BAD=$(cd "$S" && { grep -rlF '<?' --exclude='*.php' . || true; }); [ -z "$BAD" ]
 F="$S/puzzles-site-reports.php"
 # Anchored: only these two whole lines are rewritten, and each must be there exactly once (the promoter checks it too).
 sed -i -E "s/^( \* Version:) +[0-9]+\.[0-9]+\.[0-9]+\$/\1 $V/; s/^(define\( 'PUZZLES_SITE_REPORTS_VERSION', ')[0-9]+\.[0-9]+\.[0-9]+(' \);)\$/\1$V\2/" "$F"
-[ "$(grep -cxF " * Version: $V" "$F")" = 1 ] || die "the main file needs exactly one ' * Version: X.Y.Z' line"
+HP='^([[:blank:]]*<\?(php)?)?[[:blank:]/*#@]*' # the prefix of a header line as get_file_data() reads it (any case)
+[ "$(grep -ciE "${HP}Version:" "$F")" = 1 ] && grep -qxF " * Version: $V" "$F" || die "the main file needs exactly one ' * Version: X.Y.Z' header line"
 [ "$(grep -cxF "define( 'PUZZLES_SITE_REPORTS_VERSION', '$V' );" "$F")" = 1 ] || die "the main file needs exactly one PUZZLES_SITE_REPORTS_VERSION define"
 
 if [ -n "$OVR" ]; then
@@ -51,18 +52,20 @@ if [ -n "$OVR" ]; then
 fi
 
 PY=python3; "$PY" -I -c '' 2>/dev/null || PY=python # python3 may be a Windows store stub
-# Writes the zip and prints its entries (the CI log shows what ships).
+# Writes the zip and prints its entries (the CI log shows what ships). The promoter carries this builder word for word
+# and requires a candidate to be its output (tests/promote.sh compares them): change both, in one commit.
 # Relative paths only: Git Bash does not convert path arguments for Windows Python when MSYS_NO_PATHCONV is set.
 cd "$OUT"
-"$PY" -I - <<'PYEOF'
-import os, zipfile
-names = sorted(os.path.relpath(os.path.join(d, f), 'stage').replace(os.sep, '/') for d, _, fs in os.walk('stage') for f in fs)
+"$PY" -I - stage <<'PYEOF'
+import os, sys, zipfile
+src = sys.argv[1]
+names = sorted(os.path.relpath(os.path.join(d, f), src).replace(os.sep, '/') for d, _, fs in os.walk(src) for f in fs)
 with zipfile.ZipFile('puzzles-site-reports.zip', 'w') as z:
     for n in names:
         i = zipfile.ZipInfo(n, (1980, 1, 1, 0, 0, 0))  # ZIP_STORED by default
         i.create_system = 3                              # Unix, whatever machine builds it
         i.external_attr = 0o100644 << 16                 # a regular file, rw-r--r--
-        with open(os.path.join('stage', n), 'rb') as f:
+        with open(os.path.join(src, n), 'rb') as f:
             z.writestr(i, f.read())
 print('\n'.join(names))
 PYEOF

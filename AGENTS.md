@@ -8,12 +8,11 @@ reports. Public repo (GPL-2.0-or-later). Code, docs and commits are English.
 
 ```bash
 bash scripts/build.sh <version> && bash tests/smoke.sh   # one at a time: both are heavy
-bash tests/promote.sh                                     # the promoter against a stand-in for gh
+bash tests/promote.sh                                     # promotions need script(1): skipped in Git Bash
 ```
 
-`smoke.sh` boots WordPress in Docker, installs the built zip and runs every `case_*` function. It tears the stack down
-on exit, also on failure: never leave containers running. `promote.sh` needs `script(1)` for the promotions (skipped
-in Git Bash, required in CI). CI runs `php -l` on 7.4 and 8.4 plus both tests.
+`smoke.sh` tears its Docker stack down on exit, also on failure: never leave containers running. CI runs `php -l` on
+7.4 and 8.4 plus both tests.
 
 ## Hard rules
 
@@ -33,7 +32,8 @@ in Git Bash, required in CI). CI runs `php -l` on 7.4 and 8.4 plus both tests.
 - The route contract lives in [`docs/contract.md`](./docs/contract.md); update it in the same commit
   as any route change, plus `CHANGELOG.md` under `[Unreleased]`.
 - `build.sh` rewrites the main file's one ` * Version: X.Y.Z` line and one `PUZZLES_SITE_REPORTS_VERSION` define (keep
-  both exactly in that form).
+  both exactly in that form). Its zip builder is copied word for word into the promoter, which refuses any other zip:
+  a format change goes into both in one commit (`tests/promote.sh` compares them), and the owner re-installs it.
 - Signed updates and promotion: README, Updates and Release. `scripts/wp-sr-promote` is installed by hand and runs
   nothing from the repository.
 - Commits are authored as `Puzzles Internal <internal@puzzles.consulting>`; the why goes in the body.

@@ -8,6 +8,7 @@ set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 P="$REPO/scripts/wp-sr-promote"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+export XDG_CONFIG_HOME="$T/cfg" # the promoter's note of the last promotion, never the real one
 PY=python3; "$PY" -I -c '' 2>/dev/null || PY=python # python3 may be a Windows store stub
 PHP_IMAGE=$(sed -n 's/^PHP_IMAGE=\([^ ]*\).*/\1/p' "$P") # the promoter's pinned image
 php_run() {
@@ -25,7 +26,7 @@ echo "ok: keygen: public key on stdout, secret key on fd 3 only"
 # below export those, as an owner's shell might): these shims fail the run if one does.
 mkdir "$T/bin" "$T/gh"
 NOKEY='[ -z "${PUZZLES_SR_SIGNING_KEY+x}${PUZZLES_SR_NEW_SIGNING_KEY+x}${KEY+x}${NEWKEY+x}${KP+x}" ]'
-for c in unzip php docker diff sha256sum; do
+for c in unzip php docker diff cmp sha256sum python3 python; do
   r=$(command -v "$c") || continue
   printf '#!/usr/bin/env bash\n%s || { echo "LEAK: %s got a key" >&2; exit 99; }\nexec "%s" "$@"\n' "$NOKEY" "$c" "$r" >"$T/bin/$c"
   chmod +x "$T/bin/$c"
@@ -38,6 +39,8 @@ case "$1 $2" in
   "api repos/puzzles-consulting/wp-site-reports/releases/latest")
     [ -s "$GHDIR/latest" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
     cat "$GHDIR/latest" ;;
+  "api repos/puzzles-consulting/wp-site-reports/releases?per_page=100") # every release's tag, pre-releases included
+    for d in "$GHDIR"/v*/; do basename "$d"; done ;;
   "release download") # release download <tag> (--pattern <asset>)... --dir <dir>
     tag=$3; shift 3; pats=(); dir=.
     while [ $# -gt 0 ]; do case "$1" in --pattern) pats+=("$2"); shift 2 ;; --dir) dir=$2; shift 2 ;; *) shift ;; esac; done
@@ -65,6 +68,28 @@ with zipfile.ZipFile(path) as zin, zipfile.ZipFile(path + '.tmp', 'w') as zout:
     i.external_attr = (0o120777 if op == 'link' else 0o100644) << 16
     zout.writestr(i, data)
 shutil.move(path + '.tmp', path)
+EOF
+# dualzip.py <shown.zip> <hidden.zip> <out>: one file, two central directories. Info-ZIP reads the last one (shown's
+# files); PclZip, WordPress' fallback without ZipArchive, scans forward and takes the first (hidden's files).
+cat >"$T/dualzip.py" <<'EOF'
+import struct, sys
+def parts(z):  # local entries, central directory, end record (build.sh writes no comment)
+    size, off = struct.unpack('<II', z[-10:-2])
+    return z[:off], z[off:off + size], bytearray(z[-22:])
+def shift(cd, by):  # every central entry's local-header offset moves by `by`
+    cd, p = bytearray(cd), 0
+    while p < len(cd):
+        n, x, c = struct.unpack('<HHH', cd[p + 28:p + 34])
+        struct.pack_into('<I', cd, p + 42, struct.unpack('<I', cd[p + 42:p + 46])[0] + by)
+        p += 46 + n + x + c
+    return bytes(cd)
+sl, scd, se = parts(open(sys.argv[1], 'rb').read())
+hl, hcd, he = parts(open(sys.argv[2], 'rb').read())
+struct.pack_into('<I', he, 16, len(sl) + len(hl))
+hidden = hl + shift(hcd, len(sl)) + he
+struct.pack_into('<I', se, 16, len(sl) + len(hidden))
+struct.pack_into('<H', se, 20, 1)  # a comment, so the file does not end in an end record (PclZip's first look)
+open(sys.argv[3], 'wb').write(sl + hidden + scd + bytes(se) + b'.')
 EOF
 
 SK=$SK1; NSK=""
@@ -106,8 +131,15 @@ owner_sig_by() { # owner_sig_by <tag> <public key>: its owner.sig is that key's 
     | php_run -r '$p = base64_decode( trim( fgets( STDIN ) ) ); $s = base64_decode( trim( fgets( STDIN ) ) ); echo sodium_crypto_sign_verify_detached( $s, stream_get_contents( STDIN ), $p ) ? "valid" : "invalid";' | tr -d '\r')" = valid ]
 }
 
+# 0. The promoter's zip builder is build.sh's, word for word.
+builder() { sed -n "/<<'PYEOF'/,/^PYEOF/{/<<'PYEOF'/d;p}" "$1"; }
+[ -n "$(builder "$P")" ] && [ "$(builder "$P")" = "$(builder "$REPO/scripts/build.sh")" ] \
+  || { echo "FAIL: the promoter's zip builder differs from build.sh's" >&2; exit 1; }
+echo "ok: the promoter's zip builder is build.sh's"
+
 # 1. Arguments, and no latest release without --first.
-release v9.9.1 "$PUB1"
+release v9.9.1 "$PUB1"; cp "$(Z v9.9.1)" "$T/v9.9.1.zip"
+fresh() { cp "$T/v9.9.1.zip" "$(Z v9.9.1)"; } # v9.9.1 as CI built it
 refuses 'pass --first if this is the first promotion' v9.9.1 6.8.1
 refuses 'bad tested' v9.9.1 '6.8; rm -rf x' --first
 SK=""; refuses 'PUZZLES_SR_SIGNING_KEY is not set' v9.9.1 6.8.1 --first; SK=$SK1
@@ -118,8 +150,9 @@ refuses '--rotate needs the new secret key' v9.9.1 6.8.1 --first --rotate
 # 2. The candidate zip, one case per check.
 BYTE='has a byte other than TAB, LF and printable ASCII'
 PRE='before its key define'
+NOTBUILT="is not build.sh's zip of its own files"
 KEYDEF="/^define( 'PUZZLES_SR_UPDATE_PUBKEY'/"
-zipcase() { release v9.9.1 "$PUB1"; zedit "$2" v9.9.1 "$3" "${4:-x}"; refuses "$1" v9.9.1 6.8.1 --first; } # zipcase <expected> <op> <name> [bytes]
+zipcase() { fresh; zedit "$2" v9.9.1 "$3" "${4:-x}"; refuses "$1" v9.9.1 6.8.1 --first; } # zipcase <expected> <op> <name> [bytes]
 zipcase "has the entry 'other/x.php'" add other/x.php
 zipcase "has the entry 'puzzles-site-reports/../x'" add 'puzzles-site-reports/../x'
 zipcase 'something other than regular files' link puzzles-site-reports/includes/link.php
@@ -129,19 +162,31 @@ zipcase "name ending in '.'" add puzzles-site-reports/includes/x.php.
 zipcase "'puzzles-site-reports/LICENSE' $BYTE" put puzzles-site-reports/LICENSE 'caf\303\251\n'
 zipcase "'puzzles-site-reports/includes/crlf.php' $BYTE" add puzzles-site-reports/includes/crlf.php '<?php\r\n' # Git Bash: grep -U
 zipcase "'puzzles-site-reports/LICENSE' is not PHP but holds a PHP open tag" put puzzles-site-reports/LICENSE '<?php echo 1;\n'
-maincase() { release v9.9.1 "$PUB1"; main_sed v9.9.1 "$2"; refuses "$1" v9.9.1 6.8.1 --first; } # maincase <expected> <sed>
+zipcase "$NOTBUILT" add puzzles-site-reports/includes/extra.php '<?php\n' # every file passes, but out of build.sh's order
+maincase() { fresh; main_sed v9.9.1 "$2"; refuses "$1" v9.9.1 6.8.1 --first; } # maincase <expected> <sed>
 maincase 'needs exactly one version header line' '1a // Version: 6.6.6' # the line WordPress would read
+maincase 'needs exactly one version header line' '$a <? Version: 6.6.6' # get_file_data() reads "<?" too
+maincase 'must keep the exact Update URI header' '$a <?Update URI: https://evil.example/x'
 maincase 'must keep the exact Update URI header' 's|^ \* Update URI: .*| * Update URI: https://evil.example/x|'
 maincase 'must keep the exact Update URI header' 's|releases/latest/download/manifest.json|releases/download/v0/manifest.json|'
 maincase "$PRE" "${KEYDEF}i \$pzr = array( 'k'=>include __DIR__ . '/includes/seo.php' );"
 maincase "$PRE" "${KEYDEF}i define( 'PUZZLES_SR_UPDATE_PUBKEY', 'x' );" # a literal define of the key's name
 maincase "$PRE" 's|^ \* Author: .*| * Author: x */ $pzr = 1; /*|' # the header comment closed mid-line
 maincase 'needs its key on one top-level line' "${KEYDEF}{s/^/function puzzles_sr_k() { /;s/\$/ }/}"
-release v9.9.1 "$PUB2"; refuses 'not yours' v9.9.1 6.8.1 --first # another key, without --rotate
+# Two central directories: every check sees the shown files, WordPress' PclZip would install the hidden ones.
+hidden() { echo '// hidden: installed, never reviewed' >>"$T/src/includes/seo.php"; }
+release v9.9.1 "$PUB1" hidden; cp "$(Z v9.9.1)" "$T/hidden.zip"
+"$PY" -I "$T/dualzip.py" "$T/v9.9.1.zip" "$T/hidden.zip" "$(Z v9.9.1)"
+[ "$(unzip -p "$(Z v9.9.1)" puzzles-site-reports/includes/seo.php | grep -c hidden || true)" = 0 ] # Info-ZIP shows the clean files
+refuses "$NOTBUILT" v9.9.1 6.8.1 --first
+fresh; head -c $((5242880 + 1)) /dev/zero >>"$(Z v9.9.1)"; refuses 'is over 5242880 bytes' v9.9.1 6.8.1 --first
+fresh; "$PY" -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1], "a", zipfile.ZIP_DEFLATED).writestr("puzzles-site-reports/big.txt", "x" * 6000000)' "$(Z v9.9.1)"
+refuses 'over 5242880 bytes uncompressed' v9.9.1 6.8.1 --first
+release v9.9.1 "$PUB2"; refuses 'if a new key is intended' v9.9.1 6.8.1 --first # another key, without --rotate
 release v9.9.2 "$PUB1"; cp "$(Z v9.9.2)" "$(Z v9.9.1)"; refuses "' * Version: 9.9.1'" v9.9.1 6.8.1 --first # another version's zip
-release v9.9.1 "$PUB1"; refuses 'never from a pipe or a file' v9.9.1 6.8.1 --first # every check passes: no terminal
-[ ! -e "$GHDIR/latest" ] && [ ! -e "$GHDIR/v9.9.1/manifest.json" ]
-echo "ok: nothing was signed or uploaded"
+fresh; refuses 'never from a pipe or a file' v9.9.1 6.8.1 --first # every check passes: no terminal
+[ ! -e "$GHDIR/latest" ] && [ ! -e "$GHDIR/v9.9.1/manifest.json" ] && [ ! -e "$XDG_CONFIG_HOME" ]
+echo "ok: nothing was signed, uploaded or noted"
 
 # 3. The promotions, on a terminal. The baseline is GitHub's latest, accepted on its owner.sig.
 if ! command -v script >/dev/null; then
@@ -155,49 +200,67 @@ term() { # term <typed answer> <args...>: the promoter on a terminal; prints its
     script -qec "$(printf '%q ' bash "$P" "$@")" /dev/null <<<"$a" | tr -d '\r'
 }
 latest() { [ "$(cat "$GHDIR/latest")" = "$1" ]; }
+NOTEF="$XDG_CONFIG_HOME/wp-sr-promote/last"
 o=$(term 9.9.0 v9.9.1 6.8.1 --first) && { echo "$o"; exit 1; }
 grep -qF 'not confirmed' <<<"$o"; [ ! -e "$GHDIR/latest" ] && [ ! -e "$GHDIR/v9.9.1/owner.sig" ]
 echo "ok: a wrong answer on the terminal signs nothing"
 o=$(term 9.9.1 v9.9.1 6.8.1 --first) || { echo "$o"; exit 1; }
-grep -qF 'promoted v9.9.1' <<<"$o"; latest v9.9.1
+grep -qF 'promoted v9.9.1' <<<"$o"; latest v9.9.1; [ "$(cat "$NOTEF")" = "9.9.1 $(sha256sum "$(Z v9.9.1)" | cut -c1-64)" ]
 [ "$(verify "$(cat "$GHDIR/v9.9.1/manifest.json")" "$(Z v9.9.1)")" = valid ]; owner_sig_by v9.9.1 "$PUB1"
+o=$(term '' v9.9.1 6.8.1 --first); grep -qF 'nothing to do' <<<"$o" # a rerun of a finished --first
 o=$(PATH="$T/bin:$PATH" bash "$P" verify v9.9.1 "$(Z v9.9.1)" "$PUB1"); grep -qF 'ok: ' <<<"$o"
 cp "$(Z v9.9.1)" "$T/flip.zip"; printf '\377' | dd of="$T/flip.zip" bs=1 seek=100 conv=notrunc status=none
 o=$(PATH="$T/bin:$PATH" bash "$P" verify v9.9.1 "$T/flip.zip" "$PUB1" 2>&1) && exit 1; grep -qF 'is not the zip' <<<"$o"
 o=$(PATH="$T/bin:$PATH" bash "$P" verify v9.9.1 "$(Z v9.9.1)" "$PUB2" 2>&1) && exit 1; grep -qF 'is not signed by' <<<"$o"
-echo "ok: the first promotion: manifest and owner.sig signed, latest; verify checks a zip against them"
+echo "ok: the first promotion: manifest, owner.sig and note; a rerun does nothing; verify checks a zip against them"
 marker() { echo '// marker: a change' >>"$T/src/includes/seo.php"; }
 release v9.9.2 "$PUB1" marker
-o=$(term 9.9.2 v9.9.2 6.8.1) || { echo "$o"; exit 1; }
-grep -qF 'baseline: v9.9.1, the latest release (its owner.sig verified)' <<<"$o"; grep -qxF '+// marker: a change' <<<"$o"
+mv "$NOTEF" "$T/note"; o=$(term 9.9.2 v9.9.2 6.8.1) || { echo "$o"; exit 1; }
+grep -qF "baseline: v9.9.1 (owner.sig verified, GitHub's latest); baseline taken from GitHub only" <<<"$o"
+grep -qxF '+// marker: a change' <<<"$o"; grep -qF 'Companion column shows no version newer than the baseline (v9.9.1)' <<<"$o"
 ! grep -qE '^[ +]<\?php$' <<<"$o" || { echo "FAIL: the diff printed an unchanged line" >&2; exit 1; }
 grep -qF 'promoted v9.9.2' <<<"$o"; latest v9.9.2
-o=$(term 9.9.2 v9.9.2 6.8.1); grep -qF 'v9.9.2 is already the latest release: nothing to do' <<<"$o"
-release v9.9.0 "$PUB1"; refuses 'is not newer than the latest release (v9.9.2)' v9.9.0 6.8.1
-echo "ok: the next promotion is reviewed against the latest one; reruns and older tags change nothing"
+o=$(term 9.9.2 v9.9.2 6.8.1); grep -qF 'v9.9.2 is already the latest release, signed by you: nothing to do' <<<"$o"
+release v9.9.0 "$PUB1"; refuses 'v9.9.0 is not newer than v9.9.2' v9.9.0 6.8.1
+echo "ok: the next promotion is reviewed against the last one; reruns and older tags change nothing"
+LATESTMSG="GitHub's latest release is v9.9.2, but the newest release you promoted"
+release v9.9.3 "$PUB1"
 cp "$GHDIR/v9.9.2/owner.sig" "$T/sig"; cp "$GHDIR/v9.9.1/owner.sig" "$GHDIR/v9.9.2/owner.sig"
-release v9.9.3 "$PUB1"; refuses 'is not one you promoted' v9.9.3 6.8.1 # a release editor's owner.sig
+refuses "$LATESTMSG" v9.9.3 6.8.1 # a release editor's owner.sig
 cp "$T/sig" "$GHDIR/v9.9.2/owner.sig"; cp "$(Z v9.9.2)" "$T/z"; cp "$(Z v9.9.1)" "$(Z v9.9.2)"
-refuses 'zip is not the one its manifest names' v9.9.3 6.8.1 # a release editor's zip
+refuses "$LATESTMSG" v9.9.3 6.8.1 # a release editor's zip
 cp "$T/z" "$(Z v9.9.2)"; SK=$SK3; refuses 'is not one you promoted' v9.9.3 6.8.1; SK=$SK1 # another key than the one that promoted it
-echo "ok: the baseline must be the release you promoted, as you promoted it"
+mv "$GHDIR/v9.9.2/manifest.json" "$T/m"; echo v9.9.1 >"$GHDIR/latest" # v9.9.2 pulled behind this machine's back
+refuses 'is not the last release this machine promoted' v9.9.3 6.8.1
+mv "$T/m" "$GHDIR/v9.9.2/manifest.json"; echo v9.9.2 >"$GHDIR/latest"
+echo "ok: the baseline is the release you promoted last, as you promoted it, and GitHub's latest"
 
 # A key rotation: the release ships the new key; the manifest is signed with the old one, owner.sig with the new one.
 release v9.9.3 "$PUB2"
-refuses 'pass --rotate' v9.9.3 6.8.1
+refuses 'if a new key is intended' v9.9.3 6.8.1
 NSK=$SK2; o=$(term 9.9.3 v9.9.3 6.8.1 --rotate) || { echo "$o"; exit 1; }; NSK=""
 grep -qF "sites that take v9.9.3 trust only $PUB2" <<<"$o"; latest v9.9.3; owner_sig_by v9.9.3 "$PUB2"
 [ "$(verify "$(cat "$GHDIR/v9.9.3/manifest.json")" "$(Z v9.9.2)")" = valid ] # sites on v9.9.2 take it
-SK=$SK2; release v9.9.4 "$PUB2"; o=$(term 9.9.4 v9.9.4 6.8.1) || { echo "$o"; exit 1; }; grep -qF 'promoted v9.9.4' <<<"$o"
-echo "ok: a rotation, then the next release with the new key"
-# The rotation release pulled: v9.9.2 is latest again, its owner.sig is the old key's.
-echo v9.9.2 >"$GHDIR/latest"; release v9.9.5 "$PUB2"
-refuses 'pass --baseline-key <the old public key>' v9.9.5 6.8.1
-o=$(term 9.9.5 v9.9.5 6.8.1 --baseline-key "$PUB1") || { echo "$o"; exit 1; }; grep -qF 'promoted v9.9.5' <<<"$o"
-echo "ok: a pulled rotation release: --baseline-key for one run"
+echo "ok: a rotation"
+# The rotation release pulled (v9.9.2 latest again, v9.9.3 still signed); the next release serves the sites on v9.9.3.
+echo v9.9.2 >"$GHDIR/latest"; SK=$SK2; release v9.9.4 "$PUB2"
+refuses "$LATESTMSG" v9.9.4 6.8.1
+mv "$GHDIR/v9.9.3/manifest.json" "$T/m"; refuses 'no release proves a rotation' v9.9.4 6.8.1 --baseline-key "$PUB1"
+mv "$T/m" "$GHDIR/v9.9.3/manifest.json"
+o=$(term 9.9.4 v9.9.4 6.8.1 --baseline-key "$PUB1") || { echo "$o"; exit 1; }
+grep -qF 'the sites that took the rotation release v9.9.3 trust your key' <<<"$o"; grep -qF 'promoted v9.9.4' <<<"$o"
+[ "$(verify "$(cat "$GHDIR/v9.9.4/manifest.json")" "$(Z v9.9.3)")" = valid ]   # manifest: the new key, for sites on v9.9.3
+[ "$(verify "$(cat "$GHDIR/v9.9.4/manifest.json")" "$(Z v9.9.2)")" = invalid ] # not the old key
+owner_sig_by v9.9.4 "$PUB2"
+echo "ok: a pulled rotation release: --baseline-key with the rotation release as proof, signed with the new key"
+release v9.9.5 "$PUB2"; o=$(term 9.9.5 v9.9.5 6.8.1) || { echo "$o"; exit 1; }; grep -qF 'promoted v9.9.5' <<<"$o"
 # Interrupted after the upload (marking it latest failed): a rerun finishes it.
 release v9.9.6 "$PUB2"
 o=$(GH_FAIL_EDIT=1 term 9.9.6 v9.9.6 6.8.1) && { echo "$o"; exit 1; }; latest v9.9.5; [ -e "$GHDIR/v9.9.6/owner.sig" ]
 o=$(term 9.9.6 v9.9.6 6.8.1) || { echo "$o"; exit 1; }; grep -qF 'promoted v9.9.6' <<<"$o"; latest v9.9.6; owner_sig_by v9.9.6 "$PUB2"
 echo "ok: an interrupted promotion is finished by a rerun"
+# Marked latest without a manifest: not "nothing to do", it is promoted.
+release v9.9.7 "$PUB2"; echo v9.9.7 >"$GHDIR/latest"
+o=$(term 9.9.7 v9.9.7 6.8.1) || { echo "$o"; exit 1; }; grep -qF 'promoted v9.9.7' <<<"$o"; owner_sig_by v9.9.7 "$PUB2"
+echo "ok: a latest release with no manifest is promoted, not skipped"
 echo "promote: all checks passed"

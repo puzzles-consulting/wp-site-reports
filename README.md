@@ -9,9 +9,9 @@ Requires WordPress 5.8+ and PHP 7.4+.
 ## Install
 
 Client sites get only promoted releases. The portal's connect script installs the plugin and checks the release's
-signed manifest first. By hand: download `puzzles-site-reports.zip` from the latest release, check it with the key
-the sites trust, `bash ~/bin/wp-sr-promote verify vX.Y.Z puzzles-site-reports.zip <public key>` (Release, below),
-then install it:
+signed manifest first. By hand: download `puzzles-site-reports.zip` from the latest release and check it with
+`bash ~/bin/wp-sr-promote verify vX.Y.Z puzzles-site-reports.zip <public key>` (gh signed in, the promoter installed:
+Release, below). The key is the one the sites trust: for a rotation release, the key of the release before it. Then:
 
 ```bash
 wp plugin install puzzles-site-reports.zip --activate
@@ -40,21 +40,14 @@ repository alone cannot ship anything. `version` must be `X.Y.Z`, `sha256` lower
 `X.Y.Z`; anything else is ignored. The offer's package is `puzzles-sr://X.Y.Z/<sha256>`, which WordPress cannot fetch
 by itself: the plugin's download step turns it into `.../releases/download/vX.Y.Z/puzzles-site-reports.zip`, stores at
 most 5 MB of it (within 60 seconds), and installs the download only if it hashes to `sha256`. If that step is not
-loaded, the update fails instead of installing an unchecked zip. No filter can change the key or the URLs. At most
-4 KB of the manifest is read.
+loaded, the update fails instead of installing an unchecked zip. No filter can change the key or the URLs.
 
 WordPress applies offers for an `Update URI` plugin only after its own check against api.wordpress.org succeeds. A
 host that blocks wordpress.org never sees this plugin's update either; the portal's version-lag column shows it.
 
 ## Release
 
-What a developer and CI run (never in the promotion account):
-
-```bash
-bash scripts/build.sh <version>   # dist/puzzles-site-reports.zip, byte-reproducible; README and CHANGELOG do not ship
-bash tests/smoke.sh               # Docker smoke test against a throwaway WordPress
-bash tests/promote.sh             # the promoter against a stand-in for gh, with throwaway keys
-```
+The tests (CI runs them): `bash scripts/build.sh <version> && bash tests/smoke.sh`, and `bash tests/promote.sh`.
 
 Before a release: the portal accepts the new report shape and is deployed (a promotion reaches every site within
 hours).
@@ -62,27 +55,31 @@ hours).
 1. After `main`'s CI is green, tag `vX.Y.Z` on it and push the tag. `.github/workflows/release.yml` builds the zip,
    smoke-tests it and publishes it as a **pre-release**, with no manifest, so no site is offered it. That workflow only
    ever makes pre-releases.
-2. Check it on the canary, a remote site with no secrets, never from the promotion machine (`wp --ssh=<canary>` or
-   on its host): `wp plugin install <the pre-release's zip URL> --force`. Before the first rollout, also show that a
-   no-op release reaches the canary by auto-update on WP Engine: that is the gate for every site.
+2. Check it on the canary, a remote site with no secrets, never from the machine you promote from
+   (`wp --ssh=<canary>` or on its host): `wp plugin install <the pre-release's zip URL> --force`. Before the first
+   rollout, also show that a no-op release reaches the canary by auto-update on WP Engine: that is the gate for every
+   site.
 3. Promote it: `bash ~/bin/wp-sr-promote vX.Y.Z <tested>` (`--first` the very first time), with the signing key from
    the secret store in that one command's environment. Type `<tested>` yourself (the release notes say
-   `Tested with WordPress 6.8.1`); never paste a command from release notes. Review what it prints before you type
-   the version: that review is the control.
+   `Tested with WordPress 6.8.1`); never paste a command from release notes. Check that the baseline it names is the
+   newest version the portal's Companion column shows, and review what it prints before you type the version: that
+   review is the control.
 
 The promoter. [`scripts/wp-sr-promote`](scripts/wp-sr-promote) is the whole promoter and key generator; no other code
-from this repository runs in the promotion account. Its header says what it checks and needs. Review it by hand and
-install it outside the repository, from a commit you reviewed; re-install it only after reviewing its diff:
+from this repository runs on the machine you promote from. Its header says what it checks and needs. Review it by
+hand and install it outside the repository, from a commit you reviewed; re-install it only after reviewing its diff
+(a change to build.sh's zip format needs one too: the promoter refuses any zip that is not build.sh's):
 
 ```bash
 git -C <clone> show <sha>:scripts/wp-sr-promote | cat -v      # review it, all of it
 mkdir -p ~/bin && git -C <clone> show <sha>:scripts/wp-sr-promote >~/bin/wp-sr-promote
 ```
 
-It keeps no state: the baseline of each review is GitHub's latest release, accepted only on its `owner.sig` (your key
-over its manifest), so any machine with the promoter and the key can promote. A promotion uploads `manifest.json`
-(signed with the key the sites trust) and `owner.sig`, and marks the release latest; a rerun finishes an interrupted
-one.
+The baseline of each review is the newest release you promoted (its `owner.sig`, your key over its manifest,
+verifies), which must also be GitHub's latest; the promoter notes each promotion in
+`~/.config/wp-sr-promote/last` and refuses a baseline below it. Without that note (a new machine) it says the
+baseline comes from GitHub only. A promotion uploads `manifest.json` (signed with the key the sites trust) and
+`owner.sig`, and marks the release latest; a rerun finishes an interrupted one.
 
 The signing key lives in the secret store (Bitwarden) plus one offline copy. Losing it means reinstalling the plugin
 on every site over SSH, since sites accept updates only from it. It is created by the promoter:
@@ -96,8 +93,13 @@ on every site over SSH, since sites accept updates only from it. It is created b
 - Rotating the key: sites trust only the key in the version they run, so the new key ships in a release signed with
   the old one. Put the new public key in `PUZZLES_SR_UPDATE_PUBKEY`, release it, and promote it with `--rotate`, the
   old key in `PUZZLES_SR_SIGNING_KEY` and the new one in `PUZZLES_SR_NEW_SIGNING_KEY`; from then on promote with the
-  new key. Promote the next release only once the portal shows every site on the rotation release. Never mark a
-  rotation release pre-release; if it was, the next promotion needs `--baseline-key <old public key>` once.
+  new key. Promote the next release only once the portal shows every site on the rotation release.
+- A pulled rotation release strands one group of sites whatever you do next: those that took it trust only the new
+  key, the others only the old one, and one manifest serves one group. Pulled by mistake: promote it again
+  (`--rotate`, both keys; its baseline is the release before it). Really bad: choose the group by the portal's version
+  column. For the sites on the old release, promote the fix with the old key as usual. For the sites on the rotation
+  release, promote it with the new key and `--baseline-key <old public key>`; that needs the rotation release's
+  `manifest.json` and `owner.sig` still on it, as proof.
 
 Branch protection on `main` and restricting who can create `v*` tags on GitHub are still recommended.
 
