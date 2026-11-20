@@ -4,6 +4,10 @@ All notable changes to this plugin are documented here. Format: [Keep a Changelo
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-11-20
+
+No change in behaviour: a release to confirm that sites on 1.0.1 update automatically.
+
 ## [1.0.1] - 2026-11-20
 
 The first release offered to sites (1.0.0 was a pre-release only).
