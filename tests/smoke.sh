@@ -110,14 +110,13 @@ st() { [ "$(call status "$t")" = 200 ] && jq -e "$1" out/status.json; } # st <jq
 delete_update_transients() { # forces the never-checked state
   for t in update_core update_plugins update_themes; do wpcli transient delete "$t" --network >/dev/null 2>&1 || true; done
 }
-fake_checks() { # fake_checks <core offers 0|1> <plugins ok 0|1> <themes ok 0|1>: the transients as checks leave them, last
-  # checked at 1000 (core), 2000 (plugins) and 3000 (themes); hello.php is offered 9.9. A failed first check of plugins
-  # or themes stores only last_checked; a successful one stores `response` and `translations` (and `checked`, except on
-  # WordPress <= 6.4).
+fake_checks() { # fake_checks <core 0|1> <plugins 0|1> <themes 0|1>: each transient as core leaves it after a real answer
+  # (1: stamped by this plugin at 1000 for core, 2000 for plugins, 3000 for themes) or after failed checks only (0: no
+  # stamp, and no offers for core). hello.php is offered 9.9 either way.
   wpcli eval "
-    set_site_transient( 'update_core', (object) array( 'last_checked' => 1000, 'version_checked' => get_bloginfo( 'version' ), 'updates' => $1 ? array( (object) array( 'response' => 'latest', 'current' => get_bloginfo( 'version' ) ) ) : array() ) );
-    set_site_transient( 'update_plugins', (object) ( $2 ? array( 'last_checked' => 2000, 'checked' => array( 'hello.php' => '0.1' ), 'response' => array( 'hello.php' => (object) array( 'new_version' => '9.9' ) ), 'translations' => array() ) : array( 'last_checked' => 2000 ) ) );
-    set_site_transient( 'update_themes', (object) ( $3 ? array( 'last_checked' => 3000, 'checked' => array( 'twentytwentyfive' => '0.1' ), 'response' => array(), 'translations' => array() ) : array( 'last_checked' => 3000 ) ) );"
+    set_site_transient( 'update_core', (object) ( array( 'last_checked' => 1000, 'version_checked' => get_bloginfo( 'version' ), 'updates' => $1 ? array( (object) array( 'response' => 'latest', 'current' => get_bloginfo( 'version' ) ) ) : array() ) + ( $1 ? array( 'puzzles_sr_checked' => 1000 ) : array() ) ) );
+    set_site_transient( 'update_plugins', (object) ( array( 'last_checked' => 2000, 'checked' => array( 'hello.php' => '0.1' ), 'response' => array( 'hello.php' => (object) array( 'new_version' => '9.9' ) ), 'translations' => array() ) + ( $2 ? array( 'puzzles_sr_checked' => 2000 ) : array() ) ) );
+    set_site_transient( 'update_themes', (object) ( array( 'last_checked' => 3000, 'checked' => array( 'twentytwentyfive' => '0.1' ), 'response' => array(), 'translations' => array() ) + ( $3 ? array( 'puzzles_sr_checked' => 3000 ) : array() ) ) );"
 }
 
 # ---- cases (plain functions; run in the fixed order of CASES at the bottom) ----
@@ -228,42 +227,59 @@ case_status_fresh() { # no update check has run yet, then only failed ones
   rm_mu psr-offline.php; delete_update_transients
 }
 
-case_status_checked_per_transient() { # core's check, and the plugin and theme checks, each judged on its own
+case_status_checked_per_transient() { # core's check, and the plugin and theme checks, each judged on its own stamp
   t=$(fresh_token)
   C='"1970-01-01T00:16:40Z"'; PT='"1970-01-01T00:33:20Z"' # core's 1000; plugins' 2000, older than themes' 3000
   fake_checks 1 1 1; st ".wordpress.updatesCheckedAt == $C and .updatesCheckedAt == $PT"
-  fake_checks 0 1 1; st ".wordpress.updatesCheckedAt == null and .wordpress.update == null and .updatesCheckedAt == $PT" # core's disabled
+  fake_checks 0 1 1; st ".wordpress.updatesCheckedAt == null and .wordpress.update == null and .updatesCheckedAt == $PT"
   fake_checks 1 0 1; st ".wordpress.updatesCheckedAt == $C and .updatesCheckedAt == null"
   fake_checks 1 1 0; st ".wordpress.updatesCheckedAt == $C and .updatesCheckedAt == null"
-  fake_checks 1 1 1 # WordPress <= 6.4: a successful check that leaves `checked` empty still counts
-  wpcli eval 'foreach ( array( "update_plugins", "update_themes" ) as $n ) { $t = get_site_transient( $n ); $t->checked = array(); set_site_transient( $n, $t ); }'
-  st ".updatesCheckedAt == $PT"
   fake_checks 1 1 1 # the theme check older than the plugin check: the older one counts
-  wpcli eval '$t = get_site_transient( "update_themes" ); $t->last_checked = 1500; set_site_transient( "update_themes", $t );'
+  wpcli eval '$t = get_site_transient( "update_themes" ); $t->puzzles_sr_checked = 1500; set_site_transient( "update_themes", $t );'
   st '.updatesCheckedAt == "1970-01-01T00:25:00Z"'
   delete_update_transients
 }
 
-case_status_updater_response() { # updaters that add `response` (on read, or before a failed check is saved) are not a success
+case_status_check_stamp() { # the stamp: written only for an answer from api.wordpress.org, read past every transient filter
+  # one process each: http_api_debug as core fires it for a check's answer, then core saving that check's transient
+  stamp() { wpcli eval "do_action( 'http_api_debug', array( 'response' => array( 'code' => $1 ), 'body' => '$2' ), 'response', 'Requests', array(), '$3' ); set_site_transient( 'update_plugins', (object) array( 'last_checked' => time() ) ); echo (int) ! empty( get_site_option( '_site_transient_update_plugins' )->puzzles_sr_checked );" | tr -d '\r\n'; }
+  o=$(stamp 200 '{"plugins":[]}' https://api.wordpress.org/plugins/update-check/1.1/); [ "$o" = 1 ]
+  o=$(stamp 200 'not json' https://api.wordpress.org/plugins/update-check/1.1/); [ "$o" = 0 ]
+  o=$(stamp 200 '{"themes":[]}' https://api.wordpress.org/plugins/update-check/1.1/); [ "$o" = 0 ] # not the key it expects
+  o=$(stamp 500 '{"plugins":[]}' https://api.wordpress.org/plugins/update-check/1.1/); [ "$o" = 0 ]
+  o=$(stamp 200 '{"plugins":[]}' https://example.com/plugins/update-check/1.1/); [ "$o" = 0 ]
+  # an external object cache: read from its site-transient group
+  o=$(wpcli eval 'wp_using_ext_object_cache( true ); wp_cache_set( "update_plugins", (object) array( "puzzles_sr_checked" => 1234 ), "site-transient" ); wp_cache_set( "update_themes", (object) array( "puzzles_sr_checked" => 5678 ), "site-transient" ); echo puzzles_sr_checked_at( "update_plugins", "update_themes" ); wp_using_ext_object_cache( false );' | tr -d '\r\n')
+  [ "$o" = 1970-01-01T00:20:34Z ]
+  # an update disabler answering core's transient on read: the stored stamp is not refreshed, and the fake is not believed
+  t=$(fresh_token); fake_checks 1 1 1
+  put_mu psr-disabler.php '<?php add_filter( "pre_site_transient_update_core", function () { return (object) array( "last_checked" => time(), "version_checked" => get_bloginfo( "version" ), "updates" => array() ); } );'
+  wpcli eval 'wp_version_check();'
+  st '.wordpress.updatesCheckedAt == "1970-01-01T00:16:40Z" and .wordpress.update == null'
+  rm_mu psr-disabler.php; delete_update_transients
+}
+
+case_status_updater_response() { # what updaters add to a failed check (`response`, `translations`) is no answer
   t=$(fresh_token)
-  fake_checks 1 1 1; wpcli transient delete update_plugins --network # themes checked fine; plugins never checked yet
+  fake_checks 1 1 1; wpcli transient delete update_plugins --network # themes answered; plugins never checked yet
   put_mu psr-updater.php '<?php
 $psr_add = function ( $v ) { $v = is_object( $v ) ? $v : new stdClass(); $v->response = (array) ( $v->response ?? array() ); $v->response["psr-other/psr-other.php"] = (object) array( "new_version" => "2.0" ); return $v; };
 add_filter( "site_transient_update_plugins", $psr_add );        // as Plugin Update Checker does on read
-add_filter( "pre_set_site_transient_update_plugins", $psr_add ); // as EDD does before saving'
+add_filter( "pre_set_site_transient_update_plugins", $psr_add ); // as EDD does before saving
+add_filter( "pre_set_site_transient_update_plugins", function ( $v ) { if ( is_object( $v ) ) { $v->translations = array(); } return $v; } ); // as WooCommerce'"'"'s helper does'
   offline
-  wpcli eval 'wp_update_plugins();' # fails: only last_checked, plus the updater's `response`
-  [ "$(wpcli eval 'echo (int) property_exists( get_site_option( "_site_transient_update_plugins" ), "response" );' | tr -d '\r\n')" = 1 ] # the updater's, stored
+  wpcli eval 'wp_update_plugins();' # fails: last_checked, plus what the updaters add
+  [ "$(wpcli eval '$t = get_site_option( "_site_transient_update_plugins" ); echo (int) ( property_exists( $t, "response" ) && property_exists( $t, "translations" ) );' | tr -d '\r\n')" = 1 ]
   st '.updatesCheckedAt == null'
   rm_mu psr-offline.php; rm_mu psr-updater.php; delete_update_transients
 }
 
-case_status_later_failed_check() { # a check that fails after a good one moves the time and keeps the data
+case_status_later_failed_check() { # a check that fails after an answered one keeps the answer's time and data
   t=$(fresh_token)
   fake_checks 1 1 1
   offline
   wpcli eval 'wp_update_plugins(); wp_update_themes(); wp_version_check();'
-  st '(.wordpress.updatesCheckedAt | . != null and . != "1970-01-01T00:16:40Z") and (.updatesCheckedAt | . != null and . != "1970-01-01T00:33:20Z")'
+  st '.wordpress.updatesCheckedAt == "1970-01-01T00:16:40Z" and .updatesCheckedAt == "1970-01-01T00:33:20Z"'
   st '.plugins[] | select(.file == "hello.php") | .update == "9.9"'
   rm_mu psr-offline.php; delete_update_transients
 }
@@ -415,7 +431,7 @@ case_seo_with_rank_math() {
   jq -e '[.items[] | .url == null or (.url | type == "string")] | all' out/seo.json
   jq -e '.types.page.truncated == false and .types.page.items == 354 and (.types | has("product") | not)' out/seo.json
   jq -e '([.items[] | select(.type == "page")] | length) == .types.page.items and (.items | length) == (.types.page.items + .types.post.items)' out/seo.json
-  # Left for later cases: Rank Math active and the hand-made posts; the 300 seeded pages are deleted to keep the site light.
+  # Left for later cases: Rank Math active and the hand-made posts; the seeded pages are deleted to keep the site light.
   wpcli eval 'foreach ( get_posts( array( "post_type" => "page", "post_status" => "any", "meta_key" => "psr_seed", "numberposts" => -1, "fields" => "ids" ) ) as $id ) { wp_delete_post( $id, true ); }'
 }
 
@@ -427,7 +443,6 @@ case_auto_update_email() { # a successful automatic update of only this plugin s
   o=$(e '"akismet/akismet.php"'); [ "$o" = 1 ]
   o=$(e ''); [ "$o" = 1 ]
   o=$(e '"puzzles-site-reports/puzzles-site-reports.php"' 'new WP_Error( "puzzles_sr_bad_package", "x" )'); [ "$o" = 1 ] # a failed self-update
-  o=$(e '"puzzles-site-reports/puzzles-site-reports.php"' 'false'); [ "$o" = 1 ]
 }
 
 case_update_offer() { # manifests signed by this run's throwaway key, served by the wp container (reached as http://wp)

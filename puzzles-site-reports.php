@@ -337,6 +337,54 @@ add_filter(
 	2
 );
 
+// ---- Update-check freshness ----
+// No transient shape tells a successful update check from a failed one: updaters and disablers write `response`,
+// `translations` or a whole fake transient. So the plugin records success where it happens: when api.wordpress.org
+// answers a check with HTTP 200 and the JSON it expects, the time goes onto that check's transient as core saves it
+// (`puzzles_sr_checked`, a property of core's own transient: no option of ours). A later failure saves the same object,
+// old time included; a check that never reaches the API never refreshes it. Read by puzzles_sr_checked_at().
+
+/** This request's answered checks: the time api.wordpress.org answered `$type` (plugins, themes, core), else 0. */
+function puzzles_sr_answered( string $type, bool $now = false ): int {
+	static $at = array();
+	if ( $now ) {
+		$at[ $type ] = time();
+	}
+	return $at[ $type ] ?? 0;
+}
+
+add_action(
+	'http_api_debug',
+	function ( $response, $context, $class, $args, $url ) {
+		$keys = array( 'plugins/update-check' => array( 'plugins', 'plugins' ), 'themes/update-check' => array( 'themes', 'themes' ), 'core/version-check' => array( 'core', 'offers' ) );
+		if ( 'response' !== $context || is_wp_error( $response ) || 200 !== (int) wp_remote_retrieve_response_code( $response )
+			|| ! preg_match( '~^https?://api\.wordpress\.org/(plugins/update-check|themes/update-check|core/version-check)/~', (string) $url, $m ) ) {
+			return;
+		}
+		$body = json_decode( wp_remote_retrieve_body( $response ), true );
+		if ( is_array( $body ) && isset( $body[ $keys[ $m[1] ][1] ] ) ) {
+			puzzles_sr_answered( $keys[ $m[1] ][0], true );
+		}
+	},
+	10,
+	5
+);
+
+foreach ( array( 'plugins', 'themes', 'core' ) as $puzzles_sr_type ) {
+	add_filter(
+		"pre_set_site_transient_update_{$puzzles_sr_type}",
+		function ( $value ) use ( $puzzles_sr_type ) {
+			$at = puzzles_sr_answered( $puzzles_sr_type );
+			if ( $at && is_object( $value ) ) {
+				$value->puzzles_sr_checked = $at;
+			}
+			return $value;
+		},
+		PHP_INT_MAX
+	);
+}
+unset( $puzzles_sr_type );
+
 // ---- Admin page: Tools > Site Reports ----
 /** On a multisite only a network admin: a sub-site admin must not read network-wide data. */
 function puzzles_sr_capability(): string {

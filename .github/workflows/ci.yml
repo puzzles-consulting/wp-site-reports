@@ -7,7 +7,9 @@ on:
     branches: [main]
     paths-ignore: ['docs/**', '.claude/**', 'AGENTS.md', 'README.md', 'CHANGELOG.md']
   schedule:
-    - cron: '17 6 * * 1' # weekly: third-party plugins and api.wordpress.org change under the version matrix
+    # Weekly: third-party plugins and api.wordpress.org change under the version matrix. GitHub turns a schedule off
+    # after 60 days without repository activity.
+    - cron: '17 6 * * 1'
 
 permissions:
   contents: read
@@ -42,7 +44,7 @@ jobs:
 
   # The plugin claims WordPress 5.8+ and PHP 7.4+: the same smoke on the oldest and newer combos (the `smoke` job above
   # is the pinned 7.1 / PHP 8.3 one). Images by digest; Rank Math at the newest release each WordPress supports (none for
-  # 5.8: its case skips), Wordfence at its latest (it supports all of them). It always runs (public repo).
+  # 5.8: its case skips), Wordfence at its latest (it supports all of them).
   smoke-matrix:
     name: smoke (WordPress ${{ matrix.wp }}, PHP ${{ matrix.php }})
     runs-on: ubuntu-latest

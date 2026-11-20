@@ -14,23 +14,19 @@ function puzzles_sr_iso( $ts ): ?string {
 }
 
 /**
- * When the named update checks last ran (the oldest), or null until each has succeeded once. Each transient is read as
- * stored, past every filter (an updater can add `response` on read, or to a failed check's transient before it is
- * saved), and judged by what only core's successful check writes: core's `updates` (none when the check is disabled),
- * and for plugins and themes `translations` with a `response` array (not `checked`: WordPress 6.4 and older leave it
- * empty on a normal check). A failed first check stores only last_checked; a later failure keeps the data and moves
- * the time.
+ * When the named update checks last got a real answer from api.wordpress.org (the oldest of them), or null when one never
+ * did since its transient was last rebuilt: the `puzzles_sr_checked` time the plugin stamps on the transient core saves
+ * ("Update-check freshness" in the main file). Read as stored, past the site_transient_* filters, through which an
+ * update disabler or a third-party updater can answer anything.
  */
 function puzzles_sr_checked_at( string ...$names ): ?string {
 	$times = array();
 	foreach ( $names as $n ) {
-		$t  = wp_using_ext_object_cache() ? wp_cache_get( $n, 'site-transient' ) : get_site_option( '_site_transient_' . $n );
-		$ok = is_object( $t ) && ( 'update_core' === $n ? ! empty( $t->updates )
-			: is_array( $t->response ?? null ) && property_exists( $t, 'translations' ) );
-		if ( ! $ok ) {
+		$t = wp_using_ext_object_cache() ? wp_cache_get( $n, 'site-transient' ) : get_site_option( '_site_transient_' . $n );
+		if ( ! is_object( $t ) || empty( $t->puzzles_sr_checked ) ) {
 			return null;
 		}
-		$times[] = (int) ( $t->last_checked ?? 0 );
+		$times[] = (int) $t->puzzles_sr_checked;
 	}
 	return puzzles_sr_iso( min( $times ) );
 }
