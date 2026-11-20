@@ -344,10 +344,13 @@ add_filter(
 // transient, once, carries the time (`puzzles_sr_checked`) and its offers (`puzzles_sr_offers`): properties of core's
 // own transient, no option of ours. status.php reads them past the transient filters (contract: updatesCheckedAt).
 // The answer is seen in http_api_debug when core makes the request, and in pre_http_request (last) when a filter answers
-// it instead: an update mirror (WP Engine's) requests its own URL and hands that answer to core's check.
+// it instead, but only if a real HTTP request completed while that filter ran: an update mirror (WP Engine's) requests
+// its own URL and hands that answer to core's check, an update disabler's canned answer is no answer.
 ( function () {
 	$check  = array( 'plugins' => 'wp_update_plugins', 'themes' => 'wp_update_themes', 'core' => 'wp_version_check' );
 	$at     = array(); // [ type => when core's check of it was answered, in this request ], until its next save
+	$real   = 0;       // responses http_api_debug has seen in this request (never a WP_Error)
+	$open   = array(); // $real when each pre_http_request still running began: a stack, since requests nest
 	$answer = function ( $response, $url ) use ( &$at, $check ) {
 		if ( 200 !== (int) wp_remote_retrieve_response_code( $response )
 			|| ! preg_match( '~^https?://api\.wordpress\.org/(plugins|themes|core)/(?:update|version)-check/~', (string) $url, $m ) ) {
@@ -375,8 +378,9 @@ add_filter(
 	};
 	add_action(
 		'http_api_debug',
-		function ( $response, $context, $class, $args, $url ) use ( $answer ) {
+		function ( $response, $context, $class, $args, $url ) use ( $answer, &$real ) {
 			if ( 'response' === $context ) {
+				$real += is_wp_error( $response ) ? 0 : 1;
 				$answer( $response, $url );
 			}
 		},
@@ -385,9 +389,18 @@ add_filter(
 	);
 	add_filter(
 		'pre_http_request',
-		function ( $pre, $args, $url ) use ( $answer ) {
+		function ( $pre ) use ( &$open, &$real ) {
+			$open[] = $real;
+			return $pre;
+		},
+		PHP_INT_MIN
+	);
+	add_filter(
+		'pre_http_request',
+		function ( $pre, $args, $url ) use ( $answer, &$open, &$real ) {
+			$start = array_pop( $open );
 			// false: nothing answered, core makes the request and http_api_debug sees the answer; a WP_Error is no answer
-			if ( is_array( $pre ) ) {
+			if ( is_array( $pre ) && null !== $start && $real > $start ) {
 				$answer( $pre, $url );
 			}
 			return $pre;

@@ -9,11 +9,13 @@ All notable changes to this plugin are documented here. Format: [Keep a Changelo
 ### Fixed
 
 - `updatesCheckedAt` and `wordpress.updatesCheckedAt` stayed `null` on sites whose host answers WordPress' update checks
-  from a mirror through `pre_http_request` (WP Engine): a mirror's answer handed to WordPress' own check now counts.
+  from a mirror through `pre_http_request` (WP Engine): a mirror's answer handed to WordPress' own check now counts when
+  the mirror really made a request; a canned answer (an update disabler's) does not.
 - A request another plugin makes from inside WordPress' update check no longer counts as the check's answer, whatever
   HTTP wrapper it uses.
 - `/status` reports `autoUpdate: true` for this plugin's own row: it always installs its own signed updates.
-- An update offered with a leading `v` (`v2.1`) is no longer hidden; it is reported as offered.
+- An update offered with a leading `v` (`v2.1`) is no longer hidden, nor outranked by a lower snapshot; it is reported as
+  offered.
 
 ## [1.0.2] - 2026-11-20
 

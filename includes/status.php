@@ -55,9 +55,14 @@ function puzzles_sr_offer_versions( string $type, $t ): array {
 	return $out;
 }
 
-/** An offered version, as given, only when it is above the installed one; a leading "v" is not compared (contract). */
+/** Whether version $a is above $b, a leading "v" or "V" on either left out (contract). */
+function puzzles_sr_above( string $a, string $b ): bool {
+	return version_compare( preg_replace( '/^v/i', '', $a ), preg_replace( '/^v/i', '', $b ), '>' );
+}
+
+/** An offered version, as given, only when it is above the installed one (contract). */
 function puzzles_sr_newer( ?string $offer, string $installed ): ?string {
-	return null !== $offer && version_compare( preg_replace( '/^v/i', '', $offer ), $installed, '>' ) ? $offer : null;
+	return null !== $offer && puzzles_sr_above( $offer, $installed ) ? $offer : null;
 }
 
 /**
@@ -72,7 +77,7 @@ function puzzles_sr_offers( string $type ): array {
 		return array_merge( $out, $read );
 	}
 	foreach ( $read as $key => $v ) {
-		if ( ! isset( $out[ $key ] ) || version_compare( $v, (string) $out[ $key ], '>' ) ) {
+		if ( ! isset( $out[ $key ] ) || puzzles_sr_above( $v, (string) $out[ $key ] ) ) {
 			$out[ $key ] = $v;
 		}
 	}

@@ -327,7 +327,13 @@ add_filter( "pre_http_request", function ( $pre, $args, $url ) {
   st '.updatesCheckedAt == null'
   # the mirror's answer to another plugin's request, outside core's check: no stamp
   o=$(via "$ok" "delete_site_transient( 'update_plugins' ); wp_remote_post( 'https://api.wordpress.org/plugins/update-check/1.1/' ); set_site_transient( 'update_plugins', (object) array( 'last_checked' => time() ) ); $(stamped update_plugins)"); [ "$o" = 0 ]
-  rm_mu psr-wpe.php; wpcli eval 'unlink( ABSPATH . "psr-mirror.php" );'; delete_update_transients
+  # an update disabler handing core's check a canned 200 with the key it expects, no request made: no answer
+  put_mu psr-canned.php '<?php add_filter( "pre_http_request", function ( $pre, $args, $url ) {
+	return false === $pre && preg_match( "~^https?://api[.]wordpress[.]org/plugins/update-check/~", $url )
+		? array( "headers" => array(), "body" => "{\"plugins\":{},\"translations\":[],\"no_update\":[]}", "response" => array( "code" => 200, "message" => "OK" ), "cookies" => array(), "filename" => null ) : $pre;
+}, 10, 3 );'
+  o=$(wpcli eval "delete_site_transient( 'update_plugins' ); wp_update_plugins(); $(stamped update_plugins)" | tr -d '\r\n'); [ "$o" = 0 ]
+  rm_mu psr-canned.php; rm_mu psr-wpe.php; wpcli eval 'unlink( ABSPATH . "psr-mirror.php" );'; delete_update_transients
 }
 
 case_status_offers() { # offers: the answered check's snapshot, plus what a filter adds on read; never hidden
@@ -358,9 +364,10 @@ case_status_offers() { # offers: the answered check's snapshot, plus what a filt
   put_mu psr-lower.php '<?php add_filter( "site_transient_update_plugins", function ( $v ) { if ( is_object( $v ) ) { $v->response["hello.php"] = (object) array( "new_version" => "9.0" ); } return $v; } );'
   st '[.plugins[] | select(.file == "hello.php") | .update] == ["9.9"]'
   rm_mu psr-lower.php
-  # an offer with a leading "v" is compared without it and reported as given
-  put_mu psr-v.php '<?php add_filter( "site_transient_update_plugins", function ( $v ) { if ( is_object( $v ) ) { $v->response["akismet/akismet.php"] = (object) array( "new_version" => "v99.0" ); } return $v; } );'
+  # an offer with a leading "v" is compared without it and reported as given, also against the snapshot (hello.php 9.9)
+  put_mu psr-v.php '<?php add_filter( "site_transient_update_plugins", function ( $v ) { if ( is_object( $v ) ) { $v->response["akismet/akismet.php"] = (object) array( "new_version" => "v99.0" ); $v->response["hello.php"] = (object) array( "new_version" => "v10.1" ); } return $v; } );'
   st '[.plugins[] | select(.file == "akismet/akismet.php") | .update] == ["v99.0"]'
+  st '[.plugins[] | select(.file == "hello.php") | .update] == ["v10.1"]'
   rm_mu psr-v.php
   # an update disabler answering core's transient on read: the stored stamp is not refreshed, the snapshot still offers
   wpcli eval 'set_site_transient( "update_core", (object) array( "last_checked" => 1000, "version_checked" => get_bloginfo( "version" ), "updates" => array(), "puzzles_sr_checked" => 1000, "puzzles_sr_offers" => array( "99.0", "100.0" ) ) );'
