@@ -57,8 +57,15 @@ case "$1 $2" in
       fi
     else rm -f "$GHDIR/$3/.pre"; printf '%s\n' "$3" >"$GHDIR/latest"; fi ;;
   "release delete-asset") rm "$GHDIR/$3/$4" ;; # release delete-asset <tag> <asset> --yes
-  "release view") # release view <tag> --json assets --jq <the zip's size>
-    [ ! -e "$GHDIR/$3/puzzles-site-reports.zip" ] || wc -c <"$GHDIR/$3/puzzles-site-reports.zip" | tr -d ' ' ;;
+  "release view") # release view <tag> --json assets --jq <the names | the zip's API URL>
+    case "$*" in
+      *apiUrl*) [ ! -e "$GHDIR/$3/puzzles-site-reports.zip" ] \
+        || echo "https://api.github.com/repos/puzzles-consulting/wp-site-reports/releases/assets/$(tr -cd 0-9 <<<"$3")" ;;
+      *) ls "$GHDIR/$3" ;;
+    esac ;;
+  "api repos/puzzles-consulting/wp-site-reports/releases/assets/"*) # an asset's bytes; its id is its tag's digits
+    for d in "$GHDIR"/v*/; do [ "$(basename "$d" | tr -cd 0-9)" != "${2##*/}" ] || exec cat "$d/puzzles-site-reports.zip"; done
+    exit 1 ;;
   *) echo "gh shim: unexpected call: $*" >&2; exit 97 ;;
 esac
 EOF
@@ -77,6 +84,20 @@ with zipfile.ZipFile(path) as zin, zipfile.ZipFile(path + '.tmp', 'w') as zout:
     i.external_attr = (0o120777 if op == 'link' else 0o100644) << 16
     zout.writestr(i, data)
 shutil.move(path + '.tmp', path)
+EOF
+# zpatch.py <zip> <local-deflate|overlap>: the first local header claims deflate behind a central "stor", or the second
+# central entry points at the first entry's data too (overlapping entries)
+cat >"$T/zpatch.py" <<'EOF'
+import struct, sys
+path, how = sys.argv[1:3]
+d = bytearray(open(path, 'rb').read())
+if how == 'local-deflate':
+    struct.pack_into('<H', d, 8, 8)
+else:
+    cdoff = struct.unpack('<I', d[-6:-2])[0]
+    nl, xl, ml = struct.unpack('<HHH', d[cdoff + 28:cdoff + 34])
+    struct.pack_into('<I', d, cdoff + 46 + nl + xl + ml + 42, 0)
+open(path, 'wb').write(bytes(d))
 EOF
 # dualzip.py <shown.zip> <hidden.zip> <out>: one file, two central directories. Info-ZIP reads the last one (shown's
 # files); PclZip, WordPress' fallback without ZipArchive, scans forward and takes the first (hidden's files).
@@ -119,7 +140,7 @@ release() { # release <tag> <public key> [function run on the tree first]: CI's 
   sed -i "s|^define( 'PUZZLES_SR_UPDATE_PUBKEY', '[^']*' );|define( 'PUZZLES_SR_UPDATE_PUBKEY', '$2' );|" "$T/src/puzzles-site-reports.php"
   [ -z "${3:-}" ] || "$3"
   bash "$REPO/scripts/build.sh" "${1#v}" --src "$T/src" --out "$T/b" >/dev/null
-  mkdir -p "$GHDIR/$1"; cp "$T/b/puzzles-site-reports.zip" "$GHDIR/$1/"; touch "$GHDIR/$1/.pre"
+  mkdir -p "$GHDIR/$1"; cp "$T/b/puzzles-site-reports.zip" "$GHDIR/$1/"; touch "$GHDIR/$1/.pre"; rm -f "$GHDIR/$1/manifest.json" "$GHDIR/$1/owner.sig"
 }
 zedit() { printf "${4:-x}" >"$T/c"; "$PY" -I "$T/zedit.py" "$1" "$(Z "$2")" "$3" "$T/c"; } # zedit <op> <tag> <name> [printf bytes]
 main_sed() { # main_sed <tag> <sed expression>: changes the main file inside <tag>'s zip
@@ -187,8 +208,10 @@ hidden() { echo '// hidden: installed, never reviewed' >>"$T/src/includes/seo.ph
 release v9.9.1 "$PUB1" hidden; cp "$(Z v9.9.1)" "$T/hidden.zip"
 "$PY" -I "$T/dualzip.py" "$T/v9.9.1.zip" "$T/hidden.zip" "$(Z v9.9.1)"
 [ "$(unzip -p "$(Z v9.9.1)" puzzles-site-reports/includes/seo.php | grep -c hidden || true)" = 0 ] # Info-ZIP shows the clean files
-refuses "$NOTBUILT" v9.9.1 6.8.1 --first
-fresh; head -c $((5242880 + 1)) /dev/zero >>"$(Z v9.9.1)"; refuses 'zip asset is over 5242880 bytes' v9.9.1 6.8.1 --first
+refuses 'does not end in an end record without a comment' v9.9.1 6.8.1 --first
+fresh; "$PY" -I "$T/zpatch.py" "$(Z v9.9.1)" local-deflate; refuses 'has a local header that differs from its central entry' v9.9.1 6.8.1 --first
+fresh; "$PY" -I "$T/zpatch.py" "$(Z v9.9.1)" overlap; refuses 'are not one after another from its start' v9.9.1 6.8.1 --first
+fresh; head -c $((5242880 + 1)) /dev/zero >>"$(Z v9.9.1)"; refuses 'is missing or over 5242880 bytes' v9.9.1 6.8.1 --first
 fresh; "$PY" -I -c '
 import sys, zipfile
 i = zipfile.ZipInfo("puzzles-site-reports/big.txt"); i.create_system = 3; i.external_attr = 0o100644 << 16
@@ -198,9 +221,9 @@ refuses 'has a compressed entry' v9.9.1 6.8.1 --first # 6 MB that deflate to a f
 release v9.9.1 "$PUB2"; refuses 'if a new key is intended' v9.9.1 6.8.1 --first # another key, without --rotate
 release v9.9.2 "$PUB1"; cp "$(Z v9.9.2)" "$(Z v9.9.1)"; refuses "' * Version: 9.9.1'" v9.9.1 6.8.1 --first # another version's zip
 fresh; refuses 'never from a pipe or a file' v9.9.1 6.8.1 --first # every check passes: no terminal
-[ ! -e "$GHDIR/latest" ] && [ ! -e "$GHDIR/v9.9.1/manifest.json" ] && [ ! -e "$XDG_CONFIG_HOME" ]
+[ ! -e "$GHDIR/latest" ]; [ ! -e "$GHDIR/v9.9.1/manifest.json" ]; [ ! -e "$XDG_CONFIG_HOME" ]
 echo "ok: nothing was signed, uploaded or noted"
-mkdir -p "$XDG_CONFIG_HOME/wp-sr-promote"; echo "9.9.0 $(printf x | sha256sum | cut -c1-64)" >"$XDG_CONFIG_HOME/wp-sr-promote/last"
+mkdir -p "$XDG_CONFIG_HOME/wp-sr-promote"; echo "9.9.0 $(printf x | sha256sum | cut -c1-64)" >"$XDG_CONFIG_HOME/wp-sr-promote/promoted"
 refuses '--first, but this machine promoted 9.9.0' v9.9.1 6.8.1 --first # its release is gone from GitHub
 rm -r "$XDG_CONFIG_HOME"
 
@@ -216,10 +239,13 @@ term() { # term <typed answer> <args...>: the promoter on a terminal; prints its
     script -qec "$(printf '%q ' bash "$P" "$@")" /dev/null <<<"$a" | tr -d '\r'
 }
 latest() { [ "$(cat "$GHDIR/latest")" = "$1" ]; }
-NOTEF="$XDG_CONFIG_HOME/wp-sr-promote/last"; PULLEDF="$XDG_CONFIG_HOME/wp-sr-promote/pulled"
+no() { if "$@"; then echo "FAIL: not expected: $*" >&2; exit 1; fi; } # no <command...>: it must fail
+snap() { rm -rf "$T/snap"; mkdir "$T/snap"; cp -r "$GHDIR" "$XDG_CONFIG_HOME" "$T/snap/"; }   # the releases and the notes, saved
+back() { rm -rf "$GHDIR" "$XDG_CONFIG_HOME"; mv "$T/snap/gh" "$GHDIR"; mv "$T/snap/cfg" "$XDG_CONFIG_HOME"; } # and restored
+NOTEF="$XDG_CONFIG_HOME/wp-sr-promote/promoted"; PULLEDF="$XDG_CONFIG_HOME/wp-sr-promote/pulled"
 pull() { PATH="$T/bin:$PATH" bash "$P" pull "$@" 2>&1; } # pull <args...>: the subcommand, no key in sight
 o=$(term 9.9.0 v9.9.1 6.8.1 --first) && { echo "$o"; exit 1; }
-grep -qF 'not confirmed' <<<"$o"; [ ! -e "$GHDIR/latest" ] && [ ! -e "$GHDIR/v9.9.1/owner.sig" ]
+grep -qF 'not confirmed' <<<"$o"; [ ! -e "$GHDIR/latest" ]; [ ! -e "$GHDIR/v9.9.1/owner.sig" ]
 echo "ok: a wrong answer on the terminal signs nothing"
 o=$(term 9.9.1 v9.9.1 6.8.1 --first) || { echo "$o"; exit 1; }
 grep -qF 'promoted v9.9.1' <<<"$o"; latest v9.9.1; [ "$(cat "$NOTEF")" = "9.9.1 $(sha256sum "$(Z v9.9.1)" | cut -c1-64)" ]
@@ -230,9 +256,13 @@ cp "$(Z v9.9.1)" "$T/flip.zip"; printf '\377' | dd of="$T/flip.zip" bs=1 seek=10
 o=$(PATH="$T/bin:$PATH" bash "$P" verify v9.9.1 "$T/flip.zip" "$PUB1" 2>&1) && exit 1; grep -qF 'is not the zip' <<<"$o"
 o=$(PATH="$T/bin:$PATH" bash "$P" verify v9.9.1 "$(Z v9.9.1)" "$PUB2" 2>&1) && exit 1; grep -qF 'is not signed by' <<<"$o"
 echo "ok: the first promotion: manifest, owner.sig and note; a rerun does nothing; verify checks a zip against them"
+snap; o=$(pull v9.9.1); grep -qF 'pulled v9.9.1' <<<"$o"; [ ! -s "$GHDIR/latest" ] # a bad first release, pulled
+release v9.9.2 "$PUB1"; o=$(term 9.9.2 v9.9.2 6.8.1 --first) || { echo "$o"; exit 1; }
+grep -qF 'baseline: none (--first)' <<<"$o"; grep -qF 'promoted v9.9.2' <<<"$o"; back
+echo "ok: after the only release is pulled, the next one is promoted with --first"
 marker() { echo '// marker: a change' >>"$T/src/includes/seo.php"; }
 release v9.9.2 "$PUB1" marker
-mv "$NOTEF" "$T/note"; o=$(term 9.9.2 v9.9.2 6.8.1) || { echo "$o"; exit 1; }
+mv "$NOTEF" "$T/note"; o=$(term 9.9.2 v9.9.2 6.8.1) || { echo "$o"; exit 1; }; cat "$T/note" "$NOTEF" >"$T/n"; mv "$T/n" "$NOTEF"
 grep -qF "baseline: v9.9.1 (owner.sig verified, GitHub's latest); baseline taken from GitHub only" <<<"$o"
 grep -qxF '+// marker: a change' <<<"$o"; grep -qF 'Companion column shows no version newer than v9.9.1, what the sites' <<<"$o"
 ! grep -qE '^[ +]<\?php$' <<<"$o" || { echo "FAIL: the diff printed an unchanged line" >&2; exit 1; }
@@ -244,18 +274,26 @@ release v9.9.3 "$PUB1"
 cp "$(Z v9.9.2)" "$T/z"; cp "$(Z v9.9.1)" "$(Z v9.9.2)" # a release editor's zip: v9.9.2 no longer counts as promoted
 refuses "GitHub's latest release is v9.9.2, but the newest release you promoted (owner.sig by $PUB1) is v9.9.1" v9.9.3 6.8.1
 cp "$T/z" "$(Z v9.9.2)"; SK=$SK3; refuses 'is not one you promoted' v9.9.3 6.8.1; SK=$SK1 # owner.sigs by another key
-cp "$NOTEF" "$T/note"; echo "9.9.2 $(printf x | sha256sum | cut -c1-64)" >"$NOTEF" # this machine promoted another v9.9.2
-refuses 'is not the last release this machine promoted' v9.9.3 6.8.1
+cp "$NOTEF" "$T/note"; sed -i "s/^9\.9\.2 .*/9.9.2 $(printf x | sha256sum | cut -c1-64)/" "$NOTEF" # another v9.9.2 here
+refuses 'is not the zip this machine promoted as v9.9.2' v9.9.3 6.8.1
 cp "$T/note" "$NOTEF"; mv "$GHDIR/v9.9.2/manifest.json" "$T/m"; echo v9.9.1 >"$GHDIR/latest" # pulled behind its back
-refuses 'and this machine did not pull 9.9.2' v9.9.3 6.8.1
+refuses 'is below 9.9.2, the highest release this machine promoted and did not pull' v9.9.3 6.8.1
 mv "$T/m" "$GHDIR/v9.9.2/manifest.json"; echo v9.9.2 >"$GHDIR/latest"
+snap; o=$(term 9.9.3 v9.9.3 6.8.1) || { echo "$o"; exit 1; } # 9.9.1-9.9.3 promoted; 9.9.3 pulled; 9.9.2 hidden by an editor
+o=$(pull v9.9.3); latest v9.9.2; mv "$GHDIR/v9.9.2/manifest.json" "$T/m"; echo v9.9.1 >"$GHDIR/latest"
+release v9.9.4 "$PUB1"; refuses 'is below 9.9.2, the highest release this machine promoted and did not pull' v9.9.4 6.8.1
+back; release v9.9.3 "$PUB1"
 echo "ok: the baseline is the release you promoted last, as you promoted it, and GitHub's latest"
 
 # Pulled: pre-release, no manifest, noted here; the next release rolls forward from the one before it.
+mkdir "$T/nophp"; printf '#!/bin/sh\nexit 127\n' >"$T/nophp/php"; cp "$T/nophp/php" "$T/nophp/docker"; chmod +x "$T/nophp/"*
+o=$(PATH="$T/nophp:$T/bin:$PATH" bash "$P" pull v9.9.2 2>&1) && { echo "$o"; exit 1; }
+grep -qF 'pull needs php or Docker to tell a rotation release' <<<"$o"; [ -e "$GHDIR/v9.9.2/manifest.json" ]; latest v9.9.2
 o=$(pull v9.9.2); grep -qF 'pulled v9.9.2' <<<"$o"
-[ -e "$GHDIR/v9.9.2/.pre" ] && [ ! -e "$GHDIR/v9.9.2/manifest.json" ] && latest v9.9.1 && grep -qx 9.9.2 "$PULLEDF"
+[ -e "$GHDIR/v9.9.2/.pre" ]; [ ! -e "$GHDIR/v9.9.2/manifest.json" ]; latest v9.9.1; grep -qx 9.9.2 "$PULLEDF"
 o=$(term 9.9.3 v9.9.3 6.8.1) || { echo "$o"; exit 1; }
-grep -qF 'baseline: v9.9.1 (' <<<"$o"; grep -qF 'promoted v9.9.3' <<<"$o"; latest v9.9.3; [ "$(cut -d' ' -f1 "$NOTEF")" = 9.9.3 ]
+grep -qF 'baseline: v9.9.1 (' <<<"$o"; grep -qF 'promoted v9.9.3' <<<"$o"; latest v9.9.3; [ "$(tail -1 "$NOTEF" | cut -d' ' -f1)" = 9.9.3 ]
+grep -qF 'or than a release this machine pulled: 9.9.2' <<<"$o"
 echo "ok: a pull, then the next release rolls forward from the release before it"
 
 # A key rotation: the release ships the new key; the manifest is signed with the old one, owner.sig with the new one.
@@ -267,20 +305,20 @@ grep -qF "sites that take v9.9.4 trust only $PUB2" <<<"$o"; latest v9.9.4; owner
 echo "ok: a rotation"
 # Pulled by mistake: its manifest stays, and promoting it again (--rotate) puts it back.
 o=$(pull v9.9.4); grep -qF 'v9.9.4 is a rotation release: its manifest.json stays' <<<"$o"
-[ -e "$GHDIR/v9.9.4/manifest.json" ] && latest v9.9.3
+[ -e "$GHDIR/v9.9.4/manifest.json" ]; latest v9.9.3
 NSK=$SK2; o=$(term 9.9.4 v9.9.4 6.8.1 --rotate) || { echo "$o"; exit 1; }; NSK=""
-grep -qF 'baseline: v9.9.3 (' <<<"$o"; grep -qF 'promoted v9.9.4' <<<"$o"; latest v9.9.4; ! grep -qx 9.9.4 "$PULLEDF"
+grep -qF 'baseline: v9.9.3 (' <<<"$o"; grep -qF 'promoted v9.9.4' <<<"$o"; latest v9.9.4; no grep -qx 9.9.4 "$PULLEDF"
 echo "ok: a rotation release pulled by mistake is promoted again"
 # Pulled for good: one manifest serves one group of sites. Both choices, from the same state.
 o=$(pull v9.9.4); grep -qF 'pulled v9.9.4' <<<"$o"
-cp -r "$GHDIR" "$T/gh.snap"; cp -r "$XDG_CONFIG_HOME" "$T/cfg.snap"
+snap
 release v9.9.5 "$PUB1"; o=$(term 9.9.5 v9.9.5 6.8.1) || { echo "$o"; exit 1; } # the sites on v9.9.3: the old key, as usual
 grep -qF 'baseline: v9.9.3 (' <<<"$o"; grep -qF 'promoted v9.9.5' <<<"$o"; owner_sig_by v9.9.5 "$PUB1"
 [ "$(verify "$(cat "$GHDIR/v9.9.5/manifest.json")" "$(Z v9.9.3)")" = valid ]
 echo "ok: after a pulled rotation, the sites on the old key get a fix as usual"
-rm -rf "$GHDIR" "$XDG_CONFIG_HOME"; mv "$T/gh.snap" "$GHDIR"; mv "$T/cfg.snap" "$XDG_CONFIG_HOME"
+back
 SK=$SK2; release v9.9.5 "$PUB2" # the sites on v9.9.4: the new key, with v9.9.4 still signed as proof
-refuses "GitHub's latest release is v9.9.3, but the newest release you promoted (owner.sig by $PUB2) is v9.9.4" v9.9.5 6.8.1
+refuses 'v9.9.4, was pulled on this machine, yet it is still signed' v9.9.5 6.8.1
 mv "$GHDIR/v9.9.4/manifest.json" "$T/m"; refuses 'no release you promoted with your key' v9.9.5 6.8.1 --baseline-key "$PUB1"
 mv "$T/m" "$GHDIR/v9.9.4/manifest.json"
 o=$(term 9.9.5 v9.9.5 6.8.1 --baseline-key "$PUB1") || { echo "$o"; exit 1; }

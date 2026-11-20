@@ -16,16 +16,15 @@
 #   wp-sr-promote verify vX.Y.Z <zip> <public key>
 #       Read-only: <zip> is the release vX.Y.Z whose manifest that key signed (a manual install).
 #   wp-sr-promote pull vX.Y.Z [--delete-manifest]
-#       Takes a bad release back: marks it pre-release, deletes its manifest.json and notes that this machine pulled it.
-#       A rotation release keeps its manifest unless --delete-manifest: --baseline-key needs it until you choose which
-#       sites to serve (README, Release).
+#       Takes a bad release back: marks it pre-release, deletes its manifest.json (a rotation release keeps it unless
+#       --delete-manifest; README, Release) and notes that this machine pulled it.
 # Needs bash 4.4+, GNU coreutils, sed, grep, diff and cmp, unzip, python3, gh, and php with sodium or Docker.
 #
 # What it guarantees: nothing reaches the sites without the owner's key, and the owner sees exactly the files that ship.
 #   1. Baseline: the highest-versioned release, pre-releases included, whose owner.sig (your key over its manifest)
 #      verifies and whose zip has the manifest's sha256: what you promoted last, whoever can edit releases. It must be
-#      GitHub's latest, and not below the highest promotion this machine noted unless this machine pulled that one.
-#      No such release: only with --first.
+#      GitHub's latest, not one this machine pulled, and not below the highest release this machine promoted and did
+#      not pull (${XDG_CONFIG_HOME:-~/.config}/wp-sr-promote/promoted). No such release: only with --first.
 #   2. Candidate: the tag's pre-release zip, at most 5 MB and stored, must be byte for byte build.sh's zip of its files
 #      (so every unzip sees the same files), and its files must pass the checks below, each named by its refusal: names,
 #      ASCII, `<?` only in PHP, the version, key, Update URI and URL lines, and the allowlist before the key define.
@@ -33,7 +32,7 @@
 #      version on a terminal.
 #   4. Sign `<version>\n<sha256>\n<requires>\n<requires_php>\n<tested>` with the key sites trust (manifest.json) and
 #      with your current key (owner.sig: the same key, or the new one with --rotate), upload both, mark it latest, and
-#      note it in ${XDG_CONFIG_HOME:-~/.config}/wp-sr-promote/last. A rerun finishes an interrupted promotion.
+#      add it to this machine's list of promotions. A rerun finishes an interrupted promotion.
 unset KEY NEWKEY KP # an exported variable of the same name would carry a key to every child
 KEY="${PUZZLES_SR_SIGNING_KEY:-}"; NEWKEY="${PUZZLES_SR_NEW_SIGNING_KEY:-}"
 unset PUZZLES_SR_SIGNING_KEY PUZZLES_SR_NEW_SIGNING_KEY
@@ -67,8 +66,8 @@ echo base64_encode( "pub" === $op ? sodium_crypto_sign_publickey_from_secretkey(
 }
 PY=python3; "$PY" -I -c '' 2>/dev/null || PY=python # python3 may be a Windows store stub
 MAX=5242880 # the plugin's PUZZLES_SITE_REPORTS_MAX_PACKAGE
-NOTE="${XDG_CONFIG_HOME:-$HOME/.config}/wp-sr-promote/last" # "<version> <sha256>": the highest this machine promoted
-PULLED="${NOTE%/*}/pulled"                                    # one version per line: what this machine pulled
+NOTE="${XDG_CONFIG_HOME:-$HOME/.config}/wp-sr-promote/promoted" # "<version> <sha256>" per line: every promotion here
+PULLED="${NOTE%/*}/pulled"                                        # one version per line: every release pulled here
 KEY_RE='^[A-Za-z0-9+/]{43}=$'
 SIG_RE='^[A-Za-z0-9+/]{86}==$'
 VER_RE='^[0-9]+\.[0-9]+(\.[0-9]+)?$'
@@ -84,6 +83,8 @@ manifest() { # manifest <file> <version>: sets F (version, sha256, requires, req
   MSG="${F[0]}"$'\n'"${F[1]}"$'\n'"${F[2]}"$'\n'"${F[3]}"$'\n'"${F[4]}"
 }
 verified() { [ "$(printf 'verify\n%s\n%s\n%s' "$1" "$2" "$3" | crypto)" = valid ]; } # verified <public> <signature> <message>
+vle() { printf '%s\n' "$1" "$2" | sort -VC; }  # vle <a> <b>: version a <= b
+pulled() { grep -qxF "$1" "$PULLED" 2>/dev/null; } # pulled <version>: this machine pulled it
 key_in() { sed -n "s/^define( 'PUZZLES_SR_UPDATE_PUBKEY', '\([^']*\)' );\$/\1/p" "$1"; } # key_in <main file>
 promoted() { # promoted <tag> <public key>: its manifest, an owner.sig by that key over it, and the zip it names ($W/r/<tag>)
   local d="$W/r/$1" s
@@ -92,8 +93,74 @@ promoted() { # promoted <tag> <public key>: its manifest, an owner.sig by that k
   manifest "$d/manifest.json" "${1#v}" || return 1
   s=$(head -c 200 "$d/owner.sig" 2>/dev/null | tr -d '\r\n' || true)
   [[ "$s" =~ $SIG_RE ]] && verified "$2" "$s" "$MSG" || return 1
-  [ -f "$d/puzzles-site-reports.zip" ] || gh release download "$1" --pattern puzzles-site-reports.zip --dir "$d" 2>/dev/null || true
-  [ -f "$d/puzzles-site-reports.zip" ] && [ "$(sha_of "$d/puzzles-site-reports.zip")" = "${F[1]}" ]
+  [ -f "$d/puzzles-site-reports.zip" ] || fetch_zip "$1" "$d/puzzles-site-reports.zip" || return 1
+  [ "$(sha_of "$d/puzzles-site-reports.zip")" = "${F[1]}" ]
+}
+fetch_zip() { # fetch_zip <tag> <file>: the release's zip, never more than MAX + 1 bytes of it; 1 if it has none or is bigger
+  local u
+  u=$(gh release view "$1" --json assets --jq '.assets[] | select(.name == "puzzles-site-reports.zip") | .apiUrl') \
+    || die "could not read $1's assets"
+  [[ "$u" =~ /releases/assets/([0-9]+)$ ]] || return 1
+  if ! gh api "repos/$GH_REPO/releases/assets/${BASH_REMATCH[1]}" -H 'Accept: application/octet-stream' | head -c $((MAX + 1)) >"$2"; then
+    [ "$(wc -c <"$2")" -gt $MAX ] || die "could not download $1's zip"
+  fi
+  [ "$(wc -c <"$2")" -le $MAX ]
+}
+# zipx <tag> <zip> [<dir>]: checks the zip as build.sh lays it out, header by header (each local header equal to its
+# central entry, stored, no flags or extra fields, one after another from the start up to the central directory, CRCs
+# right, regular files), then prints the names, or writes exactly those entries under <dir>. Nothing is written before
+# every check passed, and nothing can be bigger than the zip itself. Run it from $W with relative paths.
+zipx() {
+  "$PY" -I - "$@" <<'ZIPEOF' | tr -d '\r'
+import os, struct, sys, zipfile, zlib
+tag, path = sys.argv[1:3]
+def fail(m):
+    sys.exit("wp-sr-promote: %s's zip %s" % (tag, m))
+d = open(path, 'rb').read()
+if len(d) < 22 or d[-22:-18] != b'PK\x05\x06':
+    fail('does not end in an end record without a comment, as build.sh writes')
+n1, n, cdsize, cdoff, clen = struct.unpack('<HHIIH', d[-14:])
+if n1 != n or clen or cdoff + cdsize != len(d) - 22 or d[-18:-14] != bytes(4):
+    fail('has an end record that does not match its central directory')
+if not n:
+    fail('is empty')
+names, off, p = [], 0, cdoff
+for _ in range(n):
+    if p + 46 > cdoff + cdsize:
+        fail('has a broken central directory')
+    sig, _, _, fl, meth, _, _, crc, cs, us, nl, xl, ml, _, _, ea, lho = struct.unpack('<4sHHHHHHIIIHHHHHII', d[p:p + 46])
+    name = d[p + 46:p + 46 + nl]
+    p += 46 + nl + xl + ml
+    if sig != b'PK\x01\x02':
+        fail('has a broken central directory')
+    if (ea >> 16) & 0o170000 != 0o100000:
+        fail('holds something other than regular files (a link or a directory)')
+    if meth or fl or cs != us or xl or ml:
+        fail('has a compressed entry, or flags or extra fields: build.sh stores every file plainly')
+    if lho != off or off + 30 > cdoff:
+        fail('has entries that are not one after another from its start (overlapping, or with gaps)')
+    lsig, _, lfl, lmeth, _, _, lcrc, lcs, lus, lnl, lxl = struct.unpack('<4sHHHHHIIIHH', d[off:off + 30])
+    if lsig != b'PK\x03\x04' or (lfl, lmeth, lcrc, lcs, lus, lxl) != (fl, meth, crc, cs, us, 0) or d[off + 30:off + 30 + lnl] != name:
+        fail('has a local header that differs from its central entry')
+    off += 30 + lnl + cs
+    if off > cdoff or zlib.crc32(d[off - cs:off]) != crc:
+        fail('has an entry whose data runs into the central directory or fails its CRC')
+    try:
+        names.append(name.decode('ascii'))
+    except UnicodeDecodeError:
+        fail('has a name that is not ASCII')
+if off != cdoff or p != cdoff + cdsize:
+    fail('has bytes outside its entries and central directory')
+if len(sys.argv) < 4:
+    print('\n'.join(names))
+    sys.exit()
+z = zipfile.ZipFile(path)
+for nm in names:  # the names passed the promoter's name checks before this call
+    t = os.path.join(sys.argv[3], *nm.split('/'))
+    os.makedirs(os.path.dirname(t), exist_ok=True)
+    with open(t, 'wb') as f:
+        f.write(z.read(nm))
+ZIPEOF
 }
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 mkdir "$W/r" "$W/new" "$W/cand" "$W/base"
@@ -119,22 +186,28 @@ if [ "${1:-}" = verify ]; then
 fi
 
 if [ "${1:-}" = pull ]; then
-  [ $# -eq 2 ] || [ "${3:-}" = --delete-manifest ] && [ $# -le 3 ] && [[ "${2:-}" =~ $TAG_RE ]] || die "$USAGE"
-  PV=${BASH_REMATCH[1]}
-  gh release edit "$2" --prerelease
-  gh release download "$2" --pattern manifest.json --pattern puzzles-site-reports.zip --dir "$W/r" 2>/dev/null || true
-  if [ -f "$W/r/manifest.json" ]; then
-    ROT="" # a rotation release ships another key than the one that signed its manifest
-    if manifest "$W/r/manifest.json" "$PV" && unzip -p "$W/r/puzzles-site-reports.zip" puzzles-site-reports/puzzles-site-reports.php >"$W/r/main.php" 2>/dev/null; then
-      verified "$(key_in "$W/r/main.php")" "${F[5]}" "$MSG" || ROT=1
-    fi
-    if [ -n "$ROT" ] && [ -z "${3:-}" ]; then
-      echo "wp-sr-promote: $2 is a rotation release: its manifest.json stays, since --baseline-key needs it until you choose which sites to serve (README, Release). To delete it: wp-sr-promote pull $2 --delete-manifest" >&2
-    else
-      gh release delete-asset "$2" manifest.json --yes
+  case "$#:${3:-}" in 2: | 3:--delete-manifest) ;; *) die "$USAGE" ;; esac
+  [[ "$2" =~ $TAG_RE ]] || die "$USAGE"
+  PV=${BASH_REMATCH[1]}; ROT=""
+  ASSETS=$(gh release view "$2" --json assets --jq '.assets[].name') || die "could not read $2's assets"
+  if grep -qxF manifest.json <<<"$ASSETS" && [ -z "${3:-}" ]; then
+    # A rotation release: its zip is the one its manifest names, its owner.sig verifies with the key the zip ships, and
+    # its manifest does not (the previous key signed it). Anything else is not one to keep.
+    [ "$(echo keypair | crypto 2>/dev/null | wc -w)" = 2 ] || die "pull needs php or Docker to tell a rotation release: use --delete-manifest"
+    gh release download "$2" --pattern manifest.json --pattern owner.sig --dir "$W/r"
+    if manifest "$W/r/manifest.json" "$PV" && fetch_zip "$2" "$W/r/z.zip" && [ "$(sha_of "$W/r/z.zip")" = "${F[1]}" ]; then
+      unzip -p "$W/r/z.zip" puzzles-site-reports/puzzles-site-reports.php >"$W/r/main.php" 2>/dev/null || true
+      K=$(key_in "$W/r/main.php"); S=$(head -c 200 "$W/r/owner.sig" 2>/dev/null | tr -d '\r\n' || true)
+      [[ "$K" =~ $KEY_RE && "$S" =~ $SIG_RE ]] && verified "$K" "$S" "$MSG" && ! verified "$K" "${F[5]}" "$MSG" && ROT=1
     fi
   fi
-  mkdir -p "${PULLED%/*}"; grep -qxF "$PV" "$PULLED" 2>/dev/null || echo "$PV" >>"$PULLED"
+  gh release edit "$2" --prerelease
+  if [ -n "$ROT" ]; then
+    echo "wp-sr-promote: $2 is a rotation release: its manifest.json stays, since --baseline-key needs it until you choose which sites to serve (README, Release). To delete it: wp-sr-promote pull $2 --delete-manifest" >&2
+  elif grep -qxF manifest.json <<<"$ASSETS"; then
+    gh release delete-asset "$2" manifest.json --yes
+  fi
+  mkdir -p "${PULLED%/*}"; pulled "$PV" || echo "$PV" >>"$PULLED"
   echo "pulled $2"
   exit 0
 fi
@@ -162,13 +235,11 @@ if [ -n "$ROTATE" ]; then
   OWN=$(printf 'pub\n%s\n' "$NEWKEY" | crypto); [[ "$OWN" =~ $KEY_RE ]] || die "PUZZLES_SR_NEW_SIGNING_KEY is not a base64 Ed25519 secret key"
   [ "$OWN" != "$PUB" ] || die "--rotate, but the new key is the current one"
 fi
-ROTHINT="A key rotation involved? README, Release."
-note() { # note <version> <sha256>: the promotion, noted unless the note is higher (it never goes down); no longer pulled
-  local nv=""
-  [ ! -f "$NOTE" ] || read -r nv _ <"$NOTE" || true
-  if [ -z "$nv" ] || printf '%s\n' "$nv" "$1" | sort -VC; then
-    mkdir -p "${NOTE%/*}" && printf '%s %s\n' "$1" "$2" >"$NOTE" || echo "wp-sr-promote: could not write $NOTE" >&2
-  fi
+# The floor: the highest version this machine promoted and did not pull.
+FLOOR=$([ ! -f "$NOTE" ] || cut -d' ' -f1 "$NOTE" | grep -vxF -f <(cat "$PULLED" 2>/dev/null) | sort -V | tail -1 || true)
+note() { # note <version> <sha256>: one more promotion of this machine, no longer pulled
+  mkdir -p "${NOTE%/*}" && { grep -qxF "$1 $2" "$NOTE" 2>/dev/null || echo "$1 $2" >>"$NOTE"; } \
+    || echo "wp-sr-promote: could not write $NOTE" >&2
   [ ! -f "$PULLED" ] || { grep -vxF "$1" "$PULLED" >"$PULLED.new" || true; mv "$PULLED.new" "$PULLED"; }
 }
 
@@ -185,17 +256,18 @@ for t in "${TAGS[@]}"; do
   [ "$t" != "$TAG" ] && promoted "$t" "$BK" && { BASE=$t; RSHA=${F[1]}; break; }
 done
 if [ -z "$BASE" ]; then
-  [ -z "$LATEST" ] || die "no release has an owner.sig that verifies with $BK, so GitHub's latest, $LATEST, is not one you promoted. $ROTHINT"
+  [ -z "$LATEST" ] || die "no release has an owner.sig that verifies with $BK, so GitHub's latest, $LATEST, is not one you promoted. A key rotation involved? README, Release."
   [ -n "$FIRST" ] || die "GitHub has no latest release and none you promoted: pass --first if this is the first promotion (everything shows as new)"
   [ -z "$ROTATE$BASEKEY" ] || die "--rotate or --baseline-key, but no release was promoted yet"
-  [ ! -f "$NOTE" ] || die "--first, but this machine promoted $(cat "$NOTE") ($NOTE): find out where that release went"
-  TRUSTED=$PUB; REF=""; BL="none (--first): everything is new"
+  [ -z "$FLOOR" ] || die "--first, but this machine promoted $FLOOR and did not pull it ($NOTE): find out where that release went"
+  TRUSTED=$PUB; BL="none (--first): everything is new"
 else
   [ -z "$FIRST" ] || die "--first, but $BASE is a release you promoted"
+  ! pulled "${BASE#v}" || die "the newest release you promoted, $BASE, was pulled on this machine, yet it is still signed (a rotation release keeps its manifest): README, Release"
   [ "$LATEST" = "$BASE" ] || [ "$LATEST" = "$TAG" ] \
-    || die "GitHub's latest release is ${LATEST:-none}, but the newest release you promoted (owner.sig by $BK) is $BASE: finish it (rerun its promotion) or pull it (README, Release), or mark it latest again once you know why. $ROTHINT"
+    || die "GitHub's latest release is ${LATEST:-none}, but the newest release you promoted (owner.sig by $BK) is $BASE: finish it (rerun its promotion) or pull it (README, Release), or mark it latest again once you know why. A key rotation involved? README, Release."
   BL="$BASE (owner.sig verified, GitHub's latest)"
-  unzip -q "$W/r/$BASE/puzzles-site-reports.zip" -d "$W/base"
+  (cd "$W" && zipx "$BASE" "r/$BASE/puzzles-site-reports.zip" base)
   TRUSTED=$(key_in "$W/base/puzzles-site-reports/puzzles-site-reports.php")
   REF=$BASE # what the sites you sign for run: the baseline, or with --baseline-key the rotation release they took
   if [ -n "$BASEKEY" ]; then # the newest release you promoted with your key must be a rotation from BASEKEY to it
@@ -208,30 +280,25 @@ else
     TRUSTED=$PUB; BL+="; the sites that took the rotation release $REF trust your key"
   fi
   for r in "$BASE" ${BASEKEY:+"$REF"}; do
-    printf '%s\n' "${r#v}" "$V" | sort -VCu || die "$TAG is not newer than $r, a release you promoted"
+    vle "${r#v}" "$V" && [ "${r#v}" != "$V" ] || die "$TAG is not newer than $r, a release you promoted"
   done
-  if [ -f "$NOTE" ]; then
-    read -r NV NS <"$NOTE" || true
-    grep -qxF "$NV" "$PULLED" 2>/dev/null \
-      || { printf '%s\n' "$NV" "${REF#v}" | sort -VC && { [ "$NV" != "${REF#v}" ] || [ "$NS" = "$RSHA" ]; }; } \
-      || die "the baseline, $REF, is not the last release this machine promoted ($NV, $NOTE) or a later one, and this machine did not pull $NV: find out why before promoting"
+  if [ -s "$NOTE" ]; then
+    [ -z "$FLOOR" ] || vle "$FLOOR" "${REF#v}" \
+      || die "the baseline, $REF, is below $FLOOR, the highest release this machine promoted and did not pull ($NOTE): find out why before promoting"
+    ! cut -d' ' -f1 "$NOTE" | grep -qxF "${REF#v}" || grep -qxF "${REF#v} $RSHA" "$NOTE" \
+      || die "the baseline, $REF, is not the zip this machine promoted as $REF ($NOTE): find out why before promoting"
   else BL+="; baseline taken from GitHub only (no $NOTE)"; fi
 fi
 [ "$PUB" = "$TRUSTED" ] || die "your signing key's public key ($PUB) is not the one sites trust now ($TRUSTED), or you are signing with the key from before a rotation"
 
 # 2. The candidate: the tag's pre-release zip, checked as it is.
-SIZE=$(gh release view "$TAG" --json assets --jq '.assets[] | select(.name == "puzzles-site-reports.zip") | .size') \
-  || die "could not read $TAG's assets"
-[[ "$SIZE" =~ ^[0-9]+$ ]] || die "$TAG has no puzzles-site-reports.zip"
-[ "$SIZE" -le $MAX ] || die "$TAG's zip asset is over $MAX bytes, which sites refuse"
-gh release download "$TAG" --pattern puzzles-site-reports.zip --dir "$W/new"
 Z="$W/new/puzzles-site-reports.zip"
-[ "$(wc -c <"$Z")" -le $MAX ] || die "$TAG's zip is over $MAX bytes, which sites refuse"
+fetch_zip "$TAG" "$Z" || die "$TAG's zip is missing or over $MAX bytes, which sites refuse"
 PATH_RE='^puzzles-site-reports/[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$'
 DEV_RE='/(con|prn|aux|nul|com[0-9]|lpt[0-9])(\.[^/]*)?/'
 declare -A SEEN # lowercased path -> f (a file) or d (a directory)
-mapfile -t NAMES < <(unzip -Z1 "$Z")
-[ ${#NAMES[@]} -gt 0 ] || die "$TAG's zip is empty"
+NAMES_OUT=$(cd "$W" && zipx "$TAG" new/puzzles-site-reports.zip) || exit 1
+mapfile -t NAMES <<<"$NAMES_OUT"
 for p in "${NAMES[@]}"; do
   l=${p,,}
   [[ "$p" =~ $PATH_RE ]] || die "$TAG's zip has the entry ${p@Q}"
@@ -244,14 +311,7 @@ for p in "${NAMES[@]}"; do
     SEEN[$d]=d
   done
 done
-[ "$(unzip -Z "$Z" | grep -cE '^-[-rwxsStT]{9} ' || true)" = ${#NAMES[@]} ] \
-  || die "$TAG's zip holds something other than regular files (a link or a directory)"
-# No decompression bomb: build.sh stores every file, so each entry is "stor", and the totals of what is stored and what
-# extraction writes agree and fit in the zip itself.
-[ "$(unzip -Z "$Z" | awk '$1 ~ /^-/ && $6 == "stor"' | wc -l)" = ${#NAMES[@]} ] || die "$TAG's zip has a compressed entry: build.sh stores every file"
-read -r UNZ CMP < <(unzip -Zt "$Z" 2>/dev/null | sed -n 's/.* \([0-9][0-9]*\) bytes uncompressed, \([0-9][0-9]*\) bytes compressed.*/\1 \2/p') || true
-[ -n "${UNZ:-}" ] && [ "$UNZ" = "${CMP:-}" ] && [ "$UNZ" -le "$(wc -c <"$Z")" ] || die "$TAG's zip does not hold its files stored, as build.sh does"
-unzip -q "$Z" -d "$W/cand" || die "$TAG's zip does not extract cleanly"
+(cd "$W" && zipx "$TAG" new/puzzles-site-reports.zip cand) || exit 1
 f=$(cd "$W/cand" && { LC_ALL=C grep -rlaUE $'[^\t -~]' . || true; } | head -1); f=${f#./}
 [ -z "$f" ] || die "$TAG's ${f@Q} has a byte other than TAB, LF and printable ASCII"
 f=$(cd "$W/cand" && { grep -rlF '<?' --exclude='*.php' . || true; } | head -1); f=${f#./}
@@ -325,7 +385,7 @@ SHA=$(sha_of "$Z")
   (cd "$W" && diff -ruN --text base cand || true) | cat -v
   echo "wp-sr-promote: in short:"
   (cd "$W" && diff -qrN base cand || true) | cat -v
-  echo "wp-sr-promote: check that the portal's Companion column shows no version newer than ${REF:-none}, what the sites you sign for run."
+  echo "wp-sr-promote: check that the portal's Companion column shows no version newer than ${REF:-none}, what the sites you sign for run$([ ! -s "$PULLED" ] || echo ", or than a release this machine pulled: $(sort -V "$PULLED" | tr '\n' ' ')")."
 } >&2
 [ -t 0 ] && [ -t 2 ] || die "the review is shown on a terminal and confirmed from it, never from a pipe or a file"
 printf 'wp-sr-promote: review the diff above, then type %s to sign %s: ' "$V" "$TAG" >&2

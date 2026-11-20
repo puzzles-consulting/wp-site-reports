@@ -9,7 +9,8 @@ Requires WordPress 5.8+ and PHP 7.4+.
 ## Install
 
 Client sites get only promoted releases, installed by the portal's connect script, which checks the signed manifest.
-By hand, check the latest release's zip first with `wp-sr-promote verify` (Release, below), then:
+By hand, check the latest release's zip first with `wp-sr-promote verify vX.Y.Z <zip> <public key>` and the key sites
+trust (Release, below), then:
 
 ```bash
 wp plugin install puzzles-site-reports.zip --activate
@@ -59,9 +60,9 @@ hours).
    site.
 3. Promote it: `bash ~/bin/wp-sr-promote vX.Y.Z <tested>` (`--first` the very first time), with the signing key from
    the secret store in that one command's environment. Type `<tested>` yourself (the release notes say
-   `Tested with WordPress 6.8.1`); never paste a command from release notes. Check that the baseline it names is the
-   newest version the portal's Companion column shows, and review what it prints before you type the version: that
-   review is the control.
+   `Tested with WordPress 6.8.1`); never paste a command from release notes. Check that the portal's Companion column
+   shows no version newer than the one it names (or than a release this machine pulled, which it lists), and review
+   what it prints before you type the version: that review is the control.
 
 The promoter. [`scripts/wp-sr-promote`](scripts/wp-sr-promote) is the whole promoter and key generator; no other code
 from this repository runs on the machine you promote from. Its header says what it checks and needs. Review it by
@@ -74,31 +75,37 @@ mkdir -p ~/bin && git -C <clone> show <sha>:scripts/wp-sr-promote >~/bin/wp-sr-p
 ```
 
 The baseline of each review is the newest release you promoted (its `owner.sig`, your key over its manifest,
-verifies), which must also be GitHub's latest; the promoter notes each promotion in
-`~/.config/wp-sr-promote/last` and refuses a baseline below it, unless this machine pulled that release. Without
-that note (a new machine) it says the baseline comes from GitHub only. `verify vX.Y.Z <zip> <public key>` checks a zip
-against its signed manifest (gh signed in; for a rotation release, the key of the release before it). A promotion uploads `manifest.json` (signed with the key the sites trust) and
+verifies), which must also be GitHub's latest and not a release this machine pulled. The promoter lists every
+promotion in `~/.config/wp-sr-promote/promoted` and every pull in `.../pulled`, and refuses a baseline below the
+highest release it promoted and did not pull; without the list (a new machine) it says the baseline comes from GitHub
+only. A promotion uploads `manifest.json` (signed with the key the sites trust) and
 `owner.sig`, and marks the release latest; a rerun finishes an interrupted one.
+
+- `verify vX.Y.Z <zip> <public key>` checks a zip against the release's signed manifest, read-only (gh signed in).
+  The key is the one sites trust: for a rotation release, the key of the release before it.
+- `pull vX.Y.Z` takes a release back (below). It needs php or Docker, like promoting.
 
 The signing key lives in the secret store (Bitwarden) plus one offline copy. Losing it means reinstalling the plugin
 on every site over SSH, since sites accept updates only from it. It is created by the promoter:
 `bash ~/bin/wp-sr-promote keygen 3>&1 1>&2 | <store-secret-from-stdin>`. The public key goes into
 `PUZZLES_SR_UPDATE_PUBKEY`; the secret key goes from file descriptor 3 straight into the store.
 
-- Bad release: `bash ~/bin/wp-sr-promote pull vX.Y.Z` marks it pre-release, deletes its `manifest.json` and notes the
-  pull on this machine: GitHub's latest falls back to the previous release, and no site is offered the bad one. Sites already on it are fixed only by rolling forward
-  to `X.Y.Z+1`, promptly: anyone who can edit releases can mark it latest again while its old signed manifest exists
-  somewhere (manifests do not expire; that is a known, parked limit).
+- Bad release: `bash ~/bin/wp-sr-promote pull vX.Y.Z` marks it pre-release, deletes its `manifest.json` (a rotation
+  release keeps it, below) and notes the pull on this machine: GitHub's latest falls back to the previous release,
+  and no site is offered the bad one. Sites already on it are fixed only by rolling forward to `X.Y.Z+1`, promptly:
+  anyone who can edit releases can mark it latest again while its old signed manifest exists somewhere (manifests do
+  not expire; that is a known, parked limit).
 - Rotating the key: sites trust only the key in the version they run, so the new key ships in a release signed with
   the old one. Put the new public key in `PUZZLES_SR_UPDATE_PUBKEY`, release it, and promote it with `--rotate`, the
   old key in `PUZZLES_SR_SIGNING_KEY` and the new one in `PUZZLES_SR_NEW_SIGNING_KEY`; from then on promote with the
   new key. Promote the next release only once the portal shows every site on the rotation release.
 - A pulled rotation release strands one group of sites whatever you do next: those that took it trust only the new
   key, the others only the old one, and one manifest serves one group. `pull` keeps a rotation release's
-  `manifest.json` for that reason (`--delete-manifest` to drop it). Pulled by mistake: promote it again (`--rotate`,
-  both keys). Really bad: choose the group by the portal's version column. For the sites on the old release, promote
-  the fix with the old key as usual. For the sites on the rotation release, promote it with the new key and
-  `--baseline-key <old public key>`, which needs the rotation release still signed, as proof.
+  `manifest.json`, since `--baseline-key` needs it until you choose a group (`--delete-manifest` drops it). Pulled by
+  mistake: promote it again (`--rotate`, both keys). Really bad: choose the group by the portal's version column. For
+  the sites on the old release, promote the fix with the old key as usual. For the sites on the rotation release,
+  promote it with the new key and `--baseline-key <old public key>`, which needs the rotation release still signed, as
+  proof.
 
 Branch protection on `main` and restricting who can create `v*` tags on GitHub are still recommended.
 
