@@ -220,6 +220,9 @@ case_status_checked_per_transient() { # core's check, and the plugin and theme c
   fake_checks 0 1 1; st ".wordpress.updatesCheckedAt == null and .wordpress.update == null and .updatesCheckedAt == $PT" # core's disabled
   fake_checks 1 0 1; st ".wordpress.updatesCheckedAt == $C and .updatesCheckedAt == null"
   fake_checks 1 1 0; st ".wordpress.updatesCheckedAt == $C and .updatesCheckedAt == null"
+  fake_checks 1 1 1 # the theme check older than the plugin check: the older one counts
+  wpcli eval '$t = get_site_transient( "update_themes" ); $t->last_checked = 1500; set_site_transient( "update_themes", $t );'
+  st '.updatesCheckedAt == "1970-01-01T00:25:00Z"'
   delete_update_transients
 }
 

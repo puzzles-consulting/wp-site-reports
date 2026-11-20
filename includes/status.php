@@ -155,18 +155,18 @@ function puzzles_sr_status(): array {
 	}
 
 	return array(
-		'companion'  => array( 'version' => PUZZLES_SITE_REPORTS_VERSION ),
-		'wordpress'  => array(
+		'companion'        => array( 'version' => PUZZLES_SITE_REPORTS_VERSION ),
+		'wordpress'        => array(
 			'version'          => get_bloginfo( 'version' ),
 			'update'           => $core_update,
 			'updatesCheckedAt' => puzzles_sr_checked_at( 'updates', $core_t ),
 		),
-		'php'        => array( 'version' => PHP_VERSION ),
-		'plugins'    => $list,
-		'mustUse'    => $mu,
-		'themes'     => $themes,
+		'php'              => array( 'version' => PHP_VERSION ),
+		'plugins'          => $list,
+		'mustUse'          => $mu,
+		'themes'           => $themes,
 		'updatesCheckedAt' => puzzles_sr_checked_at( 'checked', $plugins_t, $themes_t ),
-		'wordfence'  => puzzles_sr_wordfence( $all ),
-		'comments'   => array( 'defaultStatus' => (string) get_option( 'default_comment_status' ) ),
+		'wordfence'        => puzzles_sr_wordfence( $all ),
+		'comments'         => array( 'defaultStatus' => (string) get_option( 'default_comment_status' ) ),
 	);
 }
