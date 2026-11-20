@@ -324,11 +324,15 @@ case_status_offers() { # offers: the answered check's snapshot, plus what a filt
   put_mu psr-raise.php '<?php add_filter( "site_transient_update_plugins", function ( $v ) { if ( is_object( $v ) ) { $v->response["hello.php"] = (object) array( "new_version" => "10.1" ); } return $v; } );'
   st '[.plugins[] | select(.file == "hello.php") | .update] == ["10.1"]'
   rm_mu psr-raise.php
+  # ...and a lower one read later never lowers it (read at 9.0: still 9.9)
+  put_mu psr-lower.php '<?php add_filter( "site_transient_update_plugins", function ( $v ) { if ( is_object( $v ) ) { $v->response["hello.php"] = (object) array( "new_version" => "9.0" ); } return $v; } );'
+  st '[.plugins[] | select(.file == "hello.php") | .update] == ["9.9"]'
+  rm_mu psr-lower.php
   # an update disabler answering core's transient on read: the stored stamp is not refreshed, the snapshot still offers
-  wpcli eval 'set_site_transient( "update_core", (object) array( "last_checked" => 1000, "version_checked" => get_bloginfo( "version" ), "updates" => array(), "puzzles_sr_checked" => 1000, "puzzles_sr_offers" => array( "99.0" ) ) );'
+  wpcli eval 'set_site_transient( "update_core", (object) array( "last_checked" => 1000, "version_checked" => get_bloginfo( "version" ), "updates" => array(), "puzzles_sr_checked" => 1000, "puzzles_sr_offers" => array( "99.0", "100.0" ) ) );'
   put_mu psr-disabler.php '<?php add_filter( "pre_site_transient_update_core", function () { return (object) array( "last_checked" => time(), "version_checked" => get_bloginfo( "version" ), "updates" => array() ); } );'
   wpcli eval 'wp_version_check();'
-  st '.wordpress.updatesCheckedAt == "1970-01-01T00:16:40Z" and .wordpress.update == "99.0"'
+  st '.wordpress.updatesCheckedAt == "1970-01-01T00:16:40Z" and .wordpress.update == "100.0"'
   rm_mu psr-disabler.php; delete_update_transients
 }
 
@@ -638,7 +642,8 @@ for case_fn in "${CASES[@]}"; do # not $c: the cases set globals (case_seo_with_
 done
 # WP_DEBUG_LOG (docker-compose.yml): no warning, notice, deprecation or error from this plugin's own files
 # One grep, no pipe: under pipefail, `grep | grep -q` on a large log fails with SIGPIPE and the check would pass.
-bad=$(grep -E 'PHP (Warning|Notice|Deprecated|Fatal error|Parse error).*plugins/puzzles-site-reports/' out/debug.log 2>/dev/null || true)
+[ -f out/debug.log ] || { echo "FAIL: no out/debug.log (WP_DEBUG_LOG is off?)" >&2; exit 1; }
+bad=$(grep -E 'PHP (Warning|Notice|Deprecated|Fatal error|Parse error).*plugins/puzzles-site-reports/' out/debug.log || true)
 if [ -n "$bad" ]; then
   printf '%s\n' "$bad" >&2; echo "FAIL: the plugin logged PHP problems (out/debug.log)" >&2; exit 1
 fi
