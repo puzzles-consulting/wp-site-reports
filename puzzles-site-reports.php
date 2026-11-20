@@ -3,7 +3,7 @@
  * Plugin Name:       Puzzles Site Reports
  * Plugin URI:        https://github.com/puzzles-consulting/wp-site-reports
  * Description:       Read-only status and SEO reports of this WordPress site for Puzzles' client reports.
- * Version:           1.0.0
+ * Version:           1.0.1
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            Puzzles
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'PUZZLES_SITE_REPORTS_VERSION', '1.0.0' );
+define( 'PUZZLES_SITE_REPORTS_VERSION', '1.0.1' );
 define( 'PUZZLES_SITE_REPORTS_OPTION', 'puzzles_site_reports_token' );
 define( 'PUZZLES_SITE_REPORTS_NAMESPACE', 'puzzles-reports/v1' );
 // The self-update's constants ("Self-update" below), defined before any other file is loaded, so that none can define
@@ -97,9 +97,19 @@ function puzzles_sr_unauthorized(): WP_Error {
 	return new WP_Error( 'puzzles_reports_unauthorized', 'Not authorized.', array( 'status' => 401 ) );
 }
 
+/**
+ * Whether the request carries `_`, 32 lowercase hex characters (the portal sends 128 random bits on every request).
+ * Edge caches (WP Engine's among them) keep anonymous REST GETs for minutes keyed by URL whatever the site answers;
+ * with a fresh `_` a cached copy can only sit at a URL nobody else knows. Without it, the fixed 401.
+ */
+function puzzles_sr_cache_key_ok( $v ): bool {
+	return is_string( $v ) && 1 === preg_match( '/^[0-9a-f]{32}\z/', $v );
+}
+
 /** @return true|WP_Error */
 function puzzles_sr_authorized( WP_REST_Request $request ) {
-	return puzzles_sr_token_valid( $request->get_header( 'X-Puzzles-Reports-Token' ) ) ? true : puzzles_sr_unauthorized();
+	return puzzles_sr_cache_key_ok( $request->get_query_params()['_'] ?? null )
+		&& puzzles_sr_token_valid( $request->get_header( 'X-Puzzles-Reports-Token' ) ) ? true : puzzles_sr_unauthorized();
 }
 
 function puzzles_sr_register_route( string $route, callable $callback ): void {
@@ -176,7 +186,8 @@ add_filter(
 			return $result;
 		}
 		puzzles_sr_no_page_cache();
-		return puzzles_sr_token_valid( $_SERVER['HTTP_X_PUZZLES_REPORTS_TOKEN'] ?? '' ) ? true : puzzles_sr_unauthorized();
+		return puzzles_sr_cache_key_ok( $_GET['_'] ?? null ) && puzzles_sr_token_valid( $_SERVER['HTTP_X_PUZZLES_REPORTS_TOKEN'] ?? '' )
+			? true : puzzles_sr_unauthorized();
 	},
 	999
 );
@@ -233,18 +244,21 @@ function puzzles_sr_verified_manifest( string $body ): ?array {
 	}
 }
 
-/** Core's `update_plugins_github.com` filter (the header's Update URI host). Only answers for this plugin. */
+/**
+ * Core's `update_plugins_github.com` filter (the header's Update URI host). For this plugin it answers our verified offer
+ * or none (false), never what an earlier filter put in $update; every other plugin's answer passes through.
+ */
 function puzzles_sr_update_offer( $update, $plugin_data, $plugin_file ) {
 	if ( plugin_basename( __FILE__ ) !== $plugin_file ) {
 		return $update;
 	}
 	$res = wp_remote_get( PUZZLES_SITE_REPORTS_MANIFEST_URL, array( 'timeout' => wp_doing_cron() ? 10 : 3, 'limit_response_size' => 4096 ) );
 	if ( is_wp_error( $res ) || 200 !== (int) wp_remote_retrieve_response_code( $res ) ) {
-		return $update;
+		return false;
 	}
 	$m = puzzles_sr_verified_manifest( wp_remote_retrieve_body( $res ) );
 	if ( ! $m || ! version_compare( $m['version'], (string) $plugin_data['Version'], '>' ) ) {
-		return $update;
+		return false;
 	}
 	return array(
 		'slug'         => 'puzzles-site-reports',
@@ -263,12 +277,15 @@ add_filter( 'update_plugins_github.com', 'puzzles_sr_update_offer', 10, 3 );
 /**
  * Core's download step for this plugin's sentinel package: the release zip, returned only if it hashes to the signed
  * sha256. At most PUZZLES_SITE_REPORTS_MAX_PACKAGE bytes are read (a bigger answer is cut there and fails the hash).
- * Any other package is left to core.
+ * Any other package for this plugin is refused; every other plugin's download is left to core.
  */
 function puzzles_sr_pre_download( $reply, $package, $upgrader = null, $hook_extra = array() ) {
-	if ( is_wp_error( $reply ) || ! is_string( $package ) || 0 !== strpos( $package, 'puzzles-sr://' )
-		|| ( isset( $hook_extra['plugin'] ) && plugin_basename( __FILE__ ) !== $hook_extra['plugin'] ) ) {
+	$ours = isset( $hook_extra['plugin'] ) && plugin_basename( __FILE__ ) === $hook_extra['plugin'];
+	if ( is_wp_error( $reply ) || ( isset( $hook_extra['plugin'] ) && ! $ours ) ) {
 		return $reply;
+	}
+	if ( ! is_string( $package ) || 0 !== strpos( $package, 'puzzles-sr://' ) ) {
+		return $ours ? new WP_Error( 'puzzles_sr_not_signed', 'This plugin installs only its own signed updates.' ) : $reply;
 	}
 	if ( ! preg_match( '~^puzzles-sr://(\d+\.\d+\.\d+)/([0-9a-f]{64})\z~', $package, $p ) ) {
 		return new WP_Error( 'puzzles_sr_bad_package', 'The update package does not match its signed manifest.' );
@@ -296,11 +313,29 @@ function puzzles_sr_pre_download( $reply, $package, $upgrader = null, $hook_extr
 }
 add_filter( 'upgrader_pre_download', 'puzzles_sr_pre_download', 10, 4 );
 
-// Sites install this plugin's updates themselves; every other plugin keeps whatever core decided.
+// Sites install this plugin's own signed updates themselves; any other offer for it, and every other plugin, keeps
+// whatever core decided.
 add_filter(
 	'auto_update_plugin',
 	function ( $update, $item ) {
-		return is_object( $item ) && plugin_basename( __FILE__ ) === ( $item->plugin ?? null ) ? true : $update;
+		return is_object( $item ) && plugin_basename( __FILE__ ) === ( $item->plugin ?? null )
+			&& is_string( $item->package ?? null ) && 0 === strpos( $item->package, 'puzzles-sr://' ) ? true : $update;
+	},
+	10,
+	2
+);
+
+// No email when an automatic update run updated only this plugin (routine, and every site would mail its admin); any
+// batch with another plugin is mailed as core decides.
+add_filter(
+	'auto_plugin_update_send_email',
+	function ( $enabled, $results ) {
+		foreach ( (array) $results as $r ) {
+			if ( plugin_basename( __FILE__ ) !== ( $r->item->plugin ?? null ) ) {
+				return $enabled;
+			}
+		}
+		return $results ? false : $enabled;
 	},
 	10,
 	2

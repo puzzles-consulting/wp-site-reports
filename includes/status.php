@@ -13,12 +13,13 @@ function puzzles_sr_iso( $ts ): ?string {
 	return is_numeric( $ts ) && $ts > 0 ? gmdate( 'Y-m-d\TH:i:s\Z', (int) $ts ) : null;
 }
 
-/** When a check last ran, or null until it has succeeded once: a failed check stamps last_checked but stores no data
- * (core: no `updates`, also when the check is disabled; plugins and themes: no `checked`). The oldest of those given. */
+/** When a check last ran, or null until it has succeeded once: a failed first check stamps last_checked and stores no
+ * data (core: no `updates`, also when the check is disabled; plugins and themes: no `response`). The oldest given.
+ * Not `checked`: older WordPress (6.4 and before, at least) leaves it empty on a normal check. */
 function puzzles_sr_checked_at( string $data, ...$transients ): ?string {
 	$times = array();
 	foreach ( $transients as $t ) {
-		if ( empty( $t->$data ) ) {
+		if ( 'updates' === $data ? empty( $t->updates ) : ! is_array( $t->$data ?? null ) ) {
 			return null;
 		}
 		$times[] = (int) ( $t->last_checked ?? 0 );
@@ -50,6 +51,12 @@ function puzzles_sr_short_msg( $v ): string {
 	$s = puzzles_sr_plain( is_scalar( $v ) ? preg_replace( '/\s*<[^>]*>\s*/', ' ', (string) $v ) : null );
 	return mb_substr( trim( puzzles_sr_scrub_paths( (string) $s ) ), 0, 300 );
 }
+
+// Wordfence builds these issues' shortMsg from a user_login (wfScanEngine): a fixed text leaves instead.
+const PUZZLES_SR_WF_GENERIC = array(
+	'easyPassword'         => 'A user has an easy password.',
+	'suspiciousAdminUsers' => 'An admin user was created outside WordPress or has a suspicious username.',
+);
 
 /** Wordfence's own open issues, ignored count and last scan; null when it is not installed, or active but unreadable. Never starts a scan. */
 function puzzles_sr_wordfence( array $plugins ): ?array {
@@ -86,7 +93,7 @@ function puzzles_sr_wordfence( array $plugins ): ?array {
 			$out['issues'][] = array(
 				'type'        => (string) $i['type'],
 				'severity'    => (int) $i['severity'], // Wordfence's own: 100 critical, 75 high, 50 medium, 25 low
-				'shortMsg'    => puzzles_sr_short_msg( $i['shortMsg'] ),
+				'shortMsg'    => PUZZLES_SR_WF_GENERIC[ (string) $i['type'] ] ?? puzzles_sr_short_msg( $i['shortMsg'] ),
 				'detectedAt'  => puzzles_sr_iso( $i['time'] ?? null ), // when Wordfence last re-stored the issue (contract)
 			);
 		}
@@ -143,13 +150,13 @@ function puzzles_sr_status(): array {
 		$stylesheet = (string) $stylesheet; // a numeric folder name is an integer array key
 		$entry      = (array) ( $theme_offer[ $stylesheet ] ?? array() ); // core stores arrays, a third-party updater may store objects
 		$offer      = is_scalar( $entry['new_version'] ?? null ) ? (string) $entry['new_version'] : null;
-		$template   = $t->get_template();
+		$template   = (string) $t->get_template(); // older WordPress gives a numeric folder name as an integer here too
 		$themes[] = array(
 			'stylesheet' => (string) $stylesheet,
 			'name'       => (string) $t->get( 'Name' ),
 			'version'    => (string) $t->get( 'Version' ),
 			'active'     => (string) $stylesheet === $active,
-			'parent'     => $template !== $stylesheet ? (string) $template : null,
+			'parent'     => $template !== $stylesheet ? $template : null,
 			'update'     => $offer,
 		);
 	}
@@ -165,7 +172,7 @@ function puzzles_sr_status(): array {
 		'plugins'          => $list,
 		'mustUse'          => $mu,
 		'themes'           => $themes,
-		'updatesCheckedAt' => puzzles_sr_checked_at( 'checked', $plugins_t, $themes_t ),
+		'updatesCheckedAt' => puzzles_sr_checked_at( 'response', $plugins_t, $themes_t ),
 		'wordfence'        => puzzles_sr_wordfence( $all ),
 		'comments'         => array( 'defaultStatus' => (string) get_option( 'default_comment_status' ) ),
 	);

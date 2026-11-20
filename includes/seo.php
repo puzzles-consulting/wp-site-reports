@@ -11,7 +11,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 const PUZZLES_SR_SEO_LIMIT = 500;
-const PUZZLES_SR_SEO_CHUNK = 100;
+const PUZZLES_SR_SEO_CHUNK = 20; // posts primed at once: a page builder's content can be megabytes each
 const PUZZLES_SR_SEO_KEYS  = array( 'rank_math_focus_keyword', 'rank_math_seo_score', 'rank_math_title', 'rank_math_description', 'rank_math_robots' );
 
 /** true / false when the post sets its own Rank Math robots, null when it follows Rank Math's defaults. */
