@@ -51,8 +51,8 @@ Before a release: the portal accepts the new report shape and is deployed (a pro
 hours).
 
 1. Once the PR that brought the change is merged with its CI green, tag `vX.Y.Z` (no leading zeros) on `main` and push
-   the tag. `.github/workflows/release.yml` builds the zip, smoke-tests it and publishes it as a **pre-release**, with no manifest, so no site is offered it. That workflow only
-   ever makes pre-releases.
+   the tag. `.github/workflows/release.yml` builds the zip, smoke-tests it and publishes it as a **pre-release**, with
+   no manifest, so no site is offered it. That workflow only ever makes pre-releases.
 2. Check it on the canary, a remote site with no secrets, never from the machine you promote from
    (`wp --ssh=<canary>` or on its host): `wp plugin install <the pre-release's zip URL> --force`. Before the first
    rollout, also show that a no-op release reaches the canary by auto-update on WP Engine: that is the gate for every
