@@ -49,10 +49,15 @@ function puzzles_sr_offer_versions( string $type, $t ): array {
 	foreach ( (array) ( $t->response ?? array() ) as $key => $o ) {
 		$o = (array) $o; // core stores plugins' as objects and themes' as arrays; a third-party updater may do either
 		if ( is_scalar( $o['new_version'] ?? null ) ) {
-			$out[ (string) $key ] = (string) $o['new_version'];
+			$out[ $key ] = (string) $o['new_version'];
 		}
 	}
 	return $out;
+}
+
+/** An offered version only when it is above the installed one (contract). */
+function puzzles_sr_newer( ?string $offer, string $installed ): ?string {
+	return null !== $offer && version_compare( $offer, $installed, '>' ) ? $offer : null;
 }
 
 /**
@@ -61,7 +66,7 @@ function puzzles_sr_offer_versions( string $type, $t ): array {
  */
 function puzzles_sr_offers( string $type ): array {
 	$raw  = puzzles_sr_raw_transient( 'update_' . $type );
-	$snap = is_object( $raw ) && ! empty( $raw->puzzles_sr_checked ) && is_array( $raw->puzzles_sr_offers ?? null ) ? $raw->puzzles_sr_offers : array();
+	$snap = ! empty( $raw->puzzles_sr_checked ) && is_array( $raw->puzzles_sr_offers ?? null ) ? $raw->puzzles_sr_offers : array();
 	$read = puzzles_sr_offer_versions( $type, get_site_transient( 'update_' . $type ) );
 	return 'core' === $type ? array_merge( $snap, $read ) : $snap + $read;
 }
@@ -146,7 +151,13 @@ function puzzles_sr_wordfence( array $plugins ): ?array {
 function puzzles_sr_status(): array {
 	$plugin_offer = puzzles_sr_offers( 'plugins' );
 	$theme_offer  = puzzles_sr_offers( 'themes' );
-	$core_update  = puzzles_sr_offers( 'core' )[0] ?? null; // the first upgrade offered, wherever it sat in core's list
+	$core_update  = null; // the first upgrade offered above the running version, wherever it sat in core's list
+	foreach ( puzzles_sr_offers( 'core' ) as $v ) {
+		if ( version_compare( $v, get_bloginfo( 'version' ), '>' ) ) {
+			$core_update = $v;
+			break;
+		}
+	}
 
 	$all  = get_plugins();
 	$auto = (array) get_site_option( 'auto_update_plugins', array() );
@@ -157,7 +168,7 @@ function puzzles_sr_status(): array {
 			'name'       => (string) $p['Name'],
 			'version'    => (string) $p['Version'],
 			'active'     => is_plugin_active( $file ), // network-active counts
-			'update'     => $plugin_offer[ $file ] ?? null,
+			'update'     => puzzles_sr_newer( $plugin_offer[ $file ] ?? null, (string) $p['Version'] ),
 			'autoUpdate' => in_array( $file, $auto, true ),
 		);
 	}
@@ -177,12 +188,12 @@ function puzzles_sr_status(): array {
 		$stylesheet = (string) $stylesheet; // a numeric folder name is an integer array key
 		$template   = (string) $t->get_template(); // older WordPress gives a numeric folder name as an integer here too
 		$themes[] = array(
-			'stylesheet' => (string) $stylesheet,
+			'stylesheet' => $stylesheet,
 			'name'       => (string) $t->get( 'Name' ),
 			'version'    => (string) $t->get( 'Version' ),
-			'active'     => (string) $stylesheet === $active,
+			'active'     => $stylesheet === $active,
 			'parent'     => $template !== $stylesheet ? $template : null,
-			'update'     => $theme_offer[ $stylesheet ] ?? null,
+			'update'     => puzzles_sr_newer( $theme_offer[ $stylesheet ] ?? null, (string) $t->get( 'Version' ) ),
 		);
 	}
 

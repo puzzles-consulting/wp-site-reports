@@ -338,33 +338,40 @@ add_filter(
 );
 
 // ---- Update-check freshness ----
-// No transient shape tells an answered update check from a failed one, and stored offers can be rewritten by any filter
-// on their way back to storage (a failed check saves what it read). So the plugin records what core's own check got,
-// where it gets it: when api.wordpress.org answers wp_update_plugins(), wp_update_themes() or wp_version_check() with
-// HTTP 200 and the JSON key it expects, the next save of that transient carries the time (`puzzles_sr_checked`) and a
-// snapshot of its offers (`puzzles_sr_offers`), once: properties of core's own transient, no option of ours. Other saves
-// leave both as they are on the object saved (a failed check passes back the object it read, both included). status.php
-// reads them past the transient filters (contract: updatesCheckedAt). The cost on any request: a URL test per outgoing
-// HTTP response and an array lookup per update-transient save.
+// Why: no transient shape tells an answered update check from a failed one, and any filter can rewrite stored offers
+// that a failed check then saves back. What: when api.wordpress.org answers core's own check (HTTP 200, the JSON key it
+// expects, the request made by wp_update_plugins/wp_update_themes/wp_version_check itself), the next save of that
+// transient, once, carries the time (`puzzles_sr_checked`) and its offers (`puzzles_sr_offers`): properties of core's
+// own transient, no option of ours. status.php reads them past the transient filters (contract: updatesCheckedAt).
 ( function () {
-	$at = array(); // [ type => when api.wordpress.org answered core's check of it, in this request ], until its next save
+	$check = array( 'plugins' => 'wp_update_plugins', 'themes' => 'wp_update_themes', 'core' => 'wp_version_check' );
+	$at    = array(); // [ type => when core's check of it was answered, in this request ], until its next save
 	add_action(
 		'http_api_debug',
-		function ( $response, $context, $class, $args, $url ) use ( &$at ) {
-			if ( 'response' === $context && 200 === (int) wp_remote_retrieve_response_code( $response )
-				&& preg_match( '~^https?://api\.wordpress\.org/(plugins|themes|core)/(?:update|version)-check/~', (string) $url, $m ) ) {
-				$body = json_decode( wp_remote_retrieve_body( $response ), true );
-				$core = array( 'plugins' => 'wp_update_plugins', 'themes' => 'wp_update_themes', 'core' => 'wp_version_check' );
-				if ( isset( $body[ 'core' === $m[1] ? 'offers' : $m[1] ] ) // the answer, and core's own check asked for it
-					&& in_array( $core[ $m[1] ], array_column( debug_backtrace( DEBUG_BACKTRACE_IGNORE_ARGS ), 'function' ), true ) ) {
-					$at[ $m[1] ] = time();
+		function ( $response, $context, $class, $args, $url ) use ( &$at, $check ) {
+			if ( 'response' !== $context || 200 !== (int) wp_remote_retrieve_response_code( $response )
+				|| ! preg_match( '~^https?://api\.wordpress\.org/(plugins|themes|core)/(?:update|version)-check/~', (string) $url, $m ) ) {
+				return;
+			}
+			$body = json_decode( wp_remote_retrieve_body( $response ), true );
+			if ( ! isset( $body[ 'core' === $m[1] ? 'offers' : $m[1] ] ) ) {
+				return;
+			}
+			// The request must be core's own: the caller of the innermost wp_remote_post/get is core's check function.
+			$trace = debug_backtrace( DEBUG_BACKTRACE_IGNORE_ARGS );
+			foreach ( $trace as $i => $frame ) {
+				if ( in_array( $frame['function'], array( 'wp_remote_post', 'wp_remote_get' ), true ) ) {
+					if ( ( $trace[ $i + 1 ]['function'] ?? '' ) === $check[ $m[1] ] ) {
+						$at[ $m[1] ] = time();
+					}
+					return;
 				}
 			}
 		},
 		10,
 		5
 	);
-	foreach ( array( 'plugins', 'themes', 'core' ) as $type ) {
+	foreach ( array_keys( $check ) as $type ) {
 		add_filter(
 			"pre_set_site_transient_update_{$type}",
 			function ( $value ) use ( &$at, $type ) {
@@ -372,7 +379,7 @@ add_filter(
 					$value->puzzles_sr_checked = $at[ $type ];
 					$value->puzzles_sr_offers  = puzzles_sr_offer_versions( $type, $value );
 				}
-				unset( $at[ $type ] ); // one save per answer: never a transient rebuilt after it
+				unset( $at[ $type ] ); // once: never a transient rebuilt after the answer's save
 				return $value;
 			},
 			PHP_INT_MAX

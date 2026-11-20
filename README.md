@@ -3,9 +3,8 @@
 A read-only WordPress plugin that exposes a site's status and SEO data to Puzzles' client reports
 through two `GET` routes under `/wp-json/puzzles-reports/v1/`. It stores only the hash of its access token, plus the
 time and offers of each answered update check on WordPress' own update data, and installs its own updates. Outside
-its routes it only hooks, cheaply, into outgoing HTTP responses, saves of WordPress' update data, REST requests (its
-authentication and cache headers) and WordPress' own update runs (its signed offer, download, auto-update and email).
-After install, its update times read `null` until WordPress' next update check (normally within 12 hours).
+its routes it only adds cheap hooks (AGENTS.md, hard rule 3). After install, its update times read `null` until
+WordPress' next update check (normally within 12 hours).
 
 Requires WordPress 5.8+ and PHP 7.4+.
 
