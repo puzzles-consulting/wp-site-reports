@@ -87,7 +87,7 @@ only. A promotion uploads `manifest.json` (signed with the key the sites trust) 
 - `pull vX.Y.Z` takes a release back (below); telling a rotation release, unless `--delete-manifest`, needs php or
   Docker.
 
-The signing key lives in the secret store (Bitwarden) plus one offline copy. Losing it means reinstalling the plugin
+The signing key lives in the team's secret store plus one offline copy. Losing it means reinstalling the plugin
 on every site over SSH, since sites accept updates only from it. It is created by the promoter:
 `bash ~/bin/wp-sr-promote keygen 3>&1 1>&2 | <store-secret-from-stdin>`. The public key goes into
 `PUZZLES_SR_UPDATE_PUBKEY`; the secret key goes from file descriptor 3 straight into the store.
