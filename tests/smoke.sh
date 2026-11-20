@@ -11,6 +11,7 @@ EXPECTED_VERSION="$(cat ../dist/VERSION)" # written by scripts/build.sh
 export EXPECTED_VERSION
 
 mkdir -p out && chmod 777 out # the cli container writes here as www-data
+rm -f out/debug.log # this run's log only
 dc() { docker compose -f docker-compose.yml "$@"; }
 wpcli() { dc run --rm -T cli wp "$@"; }
 trap 'dc --profile cli down -v >/dev/null 2>&1 || true' EXIT
@@ -111,11 +112,12 @@ delete_update_transients() { # forces the never-checked state
 }
 fake_checks() { # fake_checks <core offers 0|1> <plugins ok 0|1> <themes ok 0|1>: the transients as checks leave them, last
   # checked at 1000 (core), 2000 (plugins) and 3000 (themes); hello.php is offered 9.9. A failed first check of plugins
-  # or themes stores only last_checked; a successful one stores `response` (and `checked`, except on WordPress <= 6.4).
+  # or themes stores only last_checked; a successful one stores `response` and `translations` (and `checked`, except on
+  # WordPress <= 6.4).
   wpcli eval "
     set_site_transient( 'update_core', (object) array( 'last_checked' => 1000, 'version_checked' => get_bloginfo( 'version' ), 'updates' => $1 ? array( (object) array( 'response' => 'latest', 'current' => get_bloginfo( 'version' ) ) ) : array() ) );
-    set_site_transient( 'update_plugins', (object) ( $2 ? array( 'last_checked' => 2000, 'checked' => array( 'hello.php' => '0.1' ), 'response' => array( 'hello.php' => (object) array( 'new_version' => '9.9' ) ) ) : array( 'last_checked' => 2000 ) ) );
-    set_site_transient( 'update_themes', (object) ( $3 ? array( 'last_checked' => 3000, 'checked' => array( 'twentytwentyfive' => '0.1' ), 'response' => array() ) : array( 'last_checked' => 3000 ) ) );"
+    set_site_transient( 'update_plugins', (object) ( $2 ? array( 'last_checked' => 2000, 'checked' => array( 'hello.php' => '0.1' ), 'response' => array( 'hello.php' => (object) array( 'new_version' => '9.9' ) ), 'translations' => array() ) : array( 'last_checked' => 2000 ) ) );
+    set_site_transient( 'update_themes', (object) ( $3 ? array( 'last_checked' => 3000, 'checked' => array( 'twentytwentyfive' => '0.1' ), 'response' => array(), 'translations' => array() ) : array( 'last_checked' => 3000 ) ) );"
 }
 
 # ---- cases (plain functions; run in the fixed order of CASES at the bottom) ----
@@ -153,7 +155,7 @@ case_auth() {
   curl -s -D - -o /dev/null "http://localhost:8080/?rest_route=/puzzles-reports/v1/status&_=$(ck)" | grep -qi '^cache-control:.*no-store' # the 401 too
   # the cache key: without `_`, or with anything but 32 lowercase hex, a valid token gets the same fixed 401 (an edge
   # cache keyed by URL could otherwise serve the answer to anyone who asks the same URL)
-  for q in '' '&_=' '&_=1' "&_=$(ck | tr a-f A-F)" "&_=$(ck)0" "&_[]=$(ck)"; do
+  for q in '' '&_=' '&_=1' "&_=ABCDEF0123456789ABCDEF0123456789" "&_=$(ck)0" "&_[]=$(ck)"; do
     [ "$(curl -g -s -o out/ck.json -w '%{http_code}' -H "X-Puzzles-Reports-Token: $t2" "http://localhost:8080/?rest_route=/puzzles-reports/v1/status$q")" = 401 ]
     [ "$(jq -r .code out/ck.json)" = puzzles_reports_unauthorized ]
   done
@@ -242,6 +244,20 @@ case_status_checked_per_transient() { # core's check, and the plugin and theme c
   delete_update_transients
 }
 
+case_status_updater_response() { # updaters that add `response` (on read, or before a failed check is saved) are not a success
+  t=$(fresh_token)
+  fake_checks 1 1 1; wpcli transient delete update_plugins --network # themes checked fine; plugins never checked yet
+  put_mu psr-updater.php '<?php
+$psr_add = function ( $v ) { $v = is_object( $v ) ? $v : new stdClass(); $v->response = (array) ( $v->response ?? array() ); $v->response["psr-other/psr-other.php"] = (object) array( "new_version" => "2.0" ); return $v; };
+add_filter( "site_transient_update_plugins", $psr_add );        // as Plugin Update Checker does on read
+add_filter( "pre_set_site_transient_update_plugins", $psr_add ); // as EDD does before saving'
+  offline
+  wpcli eval 'wp_update_plugins();' # fails: only last_checked, plus the updater's `response`
+  [ "$(wpcli eval 'echo (int) property_exists( get_site_option( "_site_transient_update_plugins" ), "response" );' | tr -d '\r\n')" = 1 ] # the updater's, stored
+  st '.updatesCheckedAt == null'
+  rm_mu psr-offline.php; rm_mu psr-updater.php; delete_update_transients
+}
+
 case_status_later_failed_check() { # a check that fails after a good one moves the time and keeps the data
   t=$(fresh_token)
   fake_checks 1 1 1
@@ -253,7 +269,7 @@ case_status_later_failed_check() { # a check that fails after a good one moves t
 }
 
 case_status_wordfence_and_updates() {
-  wpcli plugin install wordfence ${WF_VERSION:+--version=$WF_VERSION} --activate
+  wpcli plugin install wordfence --activate
   wpcli plugin install akismet --version=5.0 --force
   wpcli plugin deactivate akismet || true
   wpcli plugin auto-updates enable akismet
@@ -340,7 +356,7 @@ case_wordfence_user_names() { # issues whose Wordfence text names a user leave w
   jq -e '.wordfence.issues[] | select(.type == "easyPassword") | .shortMsg == "A user has an easy password."' out/status.json
   jq -e '.wordfence.issues[] | select(.type == "suspiciousAdminUsers") | .shortMsg == "An admin user was created outside WordPress or has a suspicious username."' out/status.json
   ! grep -q 'psr-secret' out/status.json || return 1
-  wpcli eval 'global $wpdb; $wpdb->query( "DELETE FROM " . wfIssues::shared()->getIssuesTable() . " WHERE ignoreP IN (\"psr-u1\", \"psr-u2\")" );'
+  wpcli eval 'global $wpdb; $wpdb->query( "DELETE FROM " . wfIssues::shared()->getIssuesTable() . " WHERE type IN (\"easyPassword\", \"suspiciousAdminUsers\")" );'
   wpcli plugin deactivate wordfence
 }
 
@@ -374,11 +390,17 @@ case_seo_with_rank_math() {
     update_post_meta( $id, "_elementor_data", str_repeat( "x", 200000 ) );
     update_post_meta( $id, "psr_seed", 1 );
   }'
+  # and 48 pages of ~500 KB content each (a builder's markup). Priming briefly holds each chunk twice (the query's
+  # buffer and its rows): 20 at a time stays under the bound below, 100 at a time (1.0.0) crosses it
+  wpcli eval 'for ( $i = 0; $i < 48; $i++ ) {
+    $id = wp_insert_post( array( "post_type" => "page", "post_status" => "publish", "post_title" => "Big $i", "post_content" => str_repeat( "x", 500000 ) ) );
+    update_post_meta( $id, "psr_seed", 1 );
+  }'
   # the same process reports the pages it read, so the memory figure is of a real report
   o=$(wpcli eval 'require_once ABSPATH . "wp-admin/includes/plugin.php"; $b = memory_get_usage(); $r = puzzles_sr_seo(); echo $r["types"]["page"]["items"], " ", memory_get_peak_usage() - $b;' | tr -d '\r\n')
   echo "seo: ${o% *} pages, peak memory over baseline ${o#* } bytes"
-  [ "${o% *}" = 306 ]
-  [ "${o#* }" -lt 33554432 ] # under 32 MB; loading the seeded meta alone would be ~60 MB
+  [ "${o% *}" = 354 ]
+  [ "${o#* }" -lt 33554432 ] # under 32 MB; loading the seeded meta alone would be ~60 MB, the 48 big pages at once ~48 MB
 
   t=$(fresh_token); [ "$(call seo "$t")" = 200 ]
   jq -e '.plugin.name == "rank_math" and (.plugin.version | type == "string" and length > 0)' out/seo.json
@@ -391,18 +413,21 @@ case_seo_with_rank_math() {
   jq -e '[.items[] | select(.title == "Draft")] | length == 0' out/seo.json
   cp out/seo.json out/seo-full.json # the full answer, kept as a CI artifact
   jq -e '[.items[] | .url == null or (.url | type == "string")] | all' out/seo.json
-  jq -e '.types.page.truncated == false and .types.page.items == 306 and (.types | has("product") | not)' out/seo.json
+  jq -e '.types.page.truncated == false and .types.page.items == 354 and (.types | has("product") | not)' out/seo.json
   jq -e '([.items[] | select(.type == "page")] | length) == .types.page.items and (.items | length) == (.types.page.items + .types.post.items)' out/seo.json
   # Left for later cases: Rank Math active and the hand-made posts; the 300 seeded pages are deleted to keep the site light.
   wpcli eval 'foreach ( get_posts( array( "post_type" => "page", "post_status" => "any", "meta_key" => "psr_seed", "numberposts" => -1, "fields" => "ids" ) ) as $id ) { wp_delete_post( $id, true ); }'
 }
 
-case_auto_update_email() { # an automatic update of only this plugin sends no email; any batch with another plugin does
-  e() { wpcli eval "echo (int) apply_filters( 'auto_plugin_update_send_email', true, array_map( function ( \$p ) { return (object) array( 'item' => (object) array( 'plugin' => \$p ) ); }, array( $1 ) ) );" | tr -d '\r\n'; }
+case_auto_update_email() { # a successful automatic update of only this plugin sends no email; anything else does
+  # e <plugin files, PHP list> [result]: the filter on one batch, every update with that result (default true: success)
+  e() { wpcli eval "echo (int) apply_filters( 'auto_plugin_update_send_email', true, array_map( function ( \$p ) { return (object) array( 'item' => (object) array( 'plugin' => \$p ), 'result' => ${2:-true} ); }, array( $1 ) ) );" | tr -d '\r\n'; }
   o=$(e '"puzzles-site-reports/puzzles-site-reports.php"'); [ "$o" = 0 ]
   o=$(e '"puzzles-site-reports/puzzles-site-reports.php", "akismet/akismet.php"'); [ "$o" = 1 ]
   o=$(e '"akismet/akismet.php"'); [ "$o" = 1 ]
   o=$(e ''); [ "$o" = 1 ]
+  o=$(e '"puzzles-site-reports/puzzles-site-reports.php"' 'new WP_Error( "puzzles_sr_bad_package", "x" )'); [ "$o" = 1 ] # a failed self-update
+  o=$(e '"puzzles-site-reports/puzzles-site-reports.php"' 'false'); [ "$o" = 1 ]
 }
 
 case_update_offer() { # manifests signed by this run's throwaway key, served by the wp container (reached as http://wp)

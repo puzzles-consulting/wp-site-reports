@@ -42,8 +42,7 @@ jobs:
 
   # The plugin claims WordPress 5.8+ and PHP 7.4+: the same smoke on the oldest and newer combos (the `smoke` job above
   # is the pinned 7.1 / PHP 8.3 one). Images by digest; Rank Math at the newest release each WordPress supports (none for
-  # 5.8: its case skips), Wordfence at its latest (it supports all of them). A PR that touches neither the plugin, its
-  # tests nor the workflows passes without running it, so the required checks still report.
+  # 5.8: its case skips), Wordfence at its latest (it supports all of them). It always runs (public repo).
   smoke-matrix:
     name: smoke (WordPress ${{ matrix.wp }}, PHP ${{ matrix.php }})
     runs-on: ubuntu-latest
@@ -74,23 +73,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          fetch-depth: 0 # the PR's changed files
           persist-credentials: false
-      - id: scope
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-        run: |
-          if [ -n "$BASE" ] && ! git diff --name-only "$BASE...HEAD" | grep -qE '^(puzzles-site-reports\.php|uninstall\.php|includes/|tests/|scripts/build\.sh|\.github/workflows/)'; then
-            echo "run=false" >>"$GITHUB_OUTPUT"; echo "Nothing the matrix tests changed: skipped."
-          else
-            echo "run=true" >>"$GITHUB_OUTPUT"
-          fi
-      - if: steps.scope.outputs.run == 'true'
-        run: bash scripts/build.sh 0.0.0-ci
-      - if: steps.scope.outputs.run == 'true'
-        run: bash tests/smoke.sh
+      - run: bash scripts/build.sh 0.0.0-ci
+      - run: bash tests/smoke.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always() && steps.scope.outputs.run == 'true'
+        if: always()
         with:
           name: smoke-out-wp${{ matrix.wp }}-php${{ matrix.php }}
           path: |

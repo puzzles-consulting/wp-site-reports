@@ -25,9 +25,9 @@ once, and creating a new connection stops the previous one at once. The routes a
 ## Updates
 
 The plugin updates itself from this repository's GitHub Releases through WordPress' own update check
-(the header's `Update URI`), and installs its own updates automatically, without an email when a run updated only this
-plugin. For its own file it offers only that signed update (an offer from any other source is dropped, and any other
-package is refused at download). The check reads
+(the header's `Update URI`), and installs its own updates automatically, without an email when a run only updated
+this plugin and succeeded. Any other source's package for it is refused at download, and never forced to
+auto-install. The check reads
 `https://github.com/puzzles-consulting/wp-site-reports/releases/latest/download/manifest.json`, which GitHub
 resolves to the newest release that is **not** a pre-release. It runs only inside WordPress' update check (cron or
 admin), never on a front-end request, and any failure leaves WordPress' own answer untouched.

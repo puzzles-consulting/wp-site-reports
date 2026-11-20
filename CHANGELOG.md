@@ -4,7 +4,9 @@ All notable changes to this plugin are documented here. Format: [Keep a Changelo
 
 ## [Unreleased]
 
-1.0.1, the first release to be promoted (1.0.0 was a pre-release only, never offered to sites).
+## [1.0.1]
+
+The first release offered to sites. 1.0.0 was a pre-release only, never offered; its entries are under Added.
 
 ### Added
 
@@ -17,9 +19,17 @@ All notable changes to this plugin are documented here. Format: [Keep a Changelo
 - Wordfence messages in `/status` carry no server path: absolute paths and every URL but an http(s) one are dropped
   (http(s) URLs stay).
 - Page caches never keep a report: the routes define `DONOTCACHEPAGE` and tell LiteSpeed Cache not to cache.
-- Edge caches cannot serve a report to others: every request must carry a fresh `_` (32 hex), or it gets the 401.
+
+### Changed
+
+- Every request must carry `_`, 32 lowercase hex characters fresh per request, or it gets the 401 (edge caches).
 - Wordfence issues that would name a user (easy passwords, suspicious admin users) are reported with a fixed text.
-- Only this plugin's own signed update is offered, auto-installed and downloaded for it; another source's is dropped.
-- No auto-update email when a run updated only this plugin.
-- `updatesCheckedAt` is right on WordPress 6.4 and older, where a successful check leaves `checked` empty.
+- No auto-update email when a run only updated this plugin, successfully.
+
+### Fixed
+
+- Another source's update package for this plugin is refused at download and never forced to auto-install.
+- `updatesCheckedAt` on WordPress 6.4 and older, where a successful check leaves `checked` empty, and next to
+  third-party updaters that add their own offers to a failed check.
 - `/seo` primes posts 20 at a time, so page-builder content stays within memory.
+- A theme in a numeric folder is no longer reported as its own parent (WordPress 5.8).

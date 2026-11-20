@@ -97,11 +97,7 @@ function puzzles_sr_unauthorized(): WP_Error {
 	return new WP_Error( 'puzzles_reports_unauthorized', 'Not authorized.', array( 'status' => 401 ) );
 }
 
-/**
- * Whether the request carries `_`, 32 lowercase hex characters (the portal sends 128 random bits on every request).
- * Edge caches (WP Engine's among them) keep anonymous REST GETs for minutes keyed by URL whatever the site answers;
- * with a fresh `_` a cached copy can only sit at a URL nobody else knows. Without it, the fixed 401.
- */
+/** `_` is 32 lowercase hex, fresh per request, so an edge cache keyed by URL never serves a report to another (contract). */
 function puzzles_sr_cache_key_ok( $v ): bool {
 	return is_string( $v ) && 1 === preg_match( '/^[0-9a-f]{32}\z/', $v );
 }
@@ -325,13 +321,13 @@ add_filter(
 	2
 );
 
-// No email when an automatic update run updated only this plugin (routine, and every site would mail its admin); any
-// batch with another plugin is mailed as core decides.
+// No email when an automatic update run only updated this plugin, successfully (routine, and every site would mail its
+// admin); a failure, or a batch with another plugin, is mailed as core decides.
 add_filter(
 	'auto_plugin_update_send_email',
 	function ( $enabled, $results ) {
 		foreach ( (array) $results as $r ) {
-			if ( plugin_basename( __FILE__ ) !== ( $r->item->plugin ?? null ) ) {
+			if ( plugin_basename( __FILE__ ) !== ( $r->item->plugin ?? null ) || true !== ( $r->result ?? null ) ) {
 				return $enabled;
 			}
 		}

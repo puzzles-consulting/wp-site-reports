@@ -13,13 +13,21 @@ function puzzles_sr_iso( $ts ): ?string {
 	return is_numeric( $ts ) && $ts > 0 ? gmdate( 'Y-m-d\TH:i:s\Z', (int) $ts ) : null;
 }
 
-/** When a check last ran, or null until it has succeeded once: a failed first check stamps last_checked and stores no
- * data (core: no `updates`, also when the check is disabled; plugins and themes: no `response`). The oldest given.
- * Not `checked`: older WordPress (6.4 and before, at least) leaves it empty on a normal check. */
-function puzzles_sr_checked_at( string $data, ...$transients ): ?string {
+/**
+ * When the named update checks last ran (the oldest), or null until each has succeeded once. Each transient is read as
+ * stored, past every filter (an updater can add `response` on read, or to a failed check's transient before it is
+ * saved), and judged by what only core's successful check writes: core's `updates` (none when the check is disabled),
+ * and for plugins and themes `translations` with a `response` array (not `checked`: WordPress 6.4 and older leave it
+ * empty on a normal check). A failed first check stores only last_checked; a later failure keeps the data and moves
+ * the time.
+ */
+function puzzles_sr_checked_at( string ...$names ): ?string {
 	$times = array();
-	foreach ( $transients as $t ) {
-		if ( 'updates' === $data ? empty( $t->updates ) : ! is_array( $t->$data ?? null ) ) {
+	foreach ( $names as $n ) {
+		$t  = wp_using_ext_object_cache() ? wp_cache_get( $n, 'site-transient' ) : get_site_option( '_site_transient_' . $n );
+		$ok = is_object( $t ) && ( 'update_core' === $n ? ! empty( $t->updates )
+			: is_array( $t->response ?? null ) && property_exists( $t, 'translations' ) );
+		if ( ! $ok ) {
 			return null;
 		}
 		$times[] = (int) ( $t->last_checked ?? 0 );
@@ -166,13 +174,13 @@ function puzzles_sr_status(): array {
 		'wordpress'        => array(
 			'version'          => get_bloginfo( 'version' ),
 			'update'           => $core_update,
-			'updatesCheckedAt' => puzzles_sr_checked_at( 'updates', $core_t ),
+			'updatesCheckedAt' => puzzles_sr_checked_at( 'update_core' ),
 		),
 		'php'              => array( 'version' => PHP_VERSION ),
 		'plugins'          => $list,
 		'mustUse'          => $mu,
 		'themes'           => $themes,
-		'updatesCheckedAt' => puzzles_sr_checked_at( 'response', $plugins_t, $themes_t ),
+		'updatesCheckedAt' => puzzles_sr_checked_at( 'update_plugins', 'update_themes' ),
 		'wordfence'        => puzzles_sr_wordfence( $all ),
 		'comments'         => array( 'defaultStatus' => (string) get_option( 'default_comment_status' ) ),
 	);
