@@ -41,10 +41,6 @@ case "$1 $2" in
     cat "$GHDIR/latest" ;;
   "api repos/puzzles-consulting/wp-site-reports/releases?per_page=100") # every release's tag, pre-releases included
     for d in "$GHDIR"/v*/; do basename "$d"; done ;;
-  "release download") # release download <tag> (--pattern <asset>)... --dir <dir>
-    tag=$3; shift 3; pats=(); dir=.
-    while [ $# -gt 0 ]; do case "$1" in --pattern) pats+=("$2"); shift 2 ;; --dir) dir=$2; shift 2 ;; *) shift ;; esac; done
-    for p in "${pats[@]}"; do [ ! -e "$GHDIR/$tag/$p" ] || cp "$GHDIR/$tag/$p" "$dir/"; done ;;
   "release upload") # release upload <tag> <file>... --clobber
     tag=$3; shift 3; for f in "$@"; do [ "$f" = --clobber ] || cp "$f" "$GHDIR/$tag/"; done ;;
   "release edit") # release edit <tag> --prerelease=false --latest | --prerelease (GitHub's latest falls back)
@@ -57,14 +53,19 @@ case "$1 $2" in
       fi
     else rm -f "$GHDIR/$3/.pre"; printf '%s\n' "$3" >"$GHDIR/latest"; fi ;;
   "release delete-asset") rm "$GHDIR/$3/$4" ;; # release delete-asset <tag> <asset> --yes
-  "release view") # release view <tag> --json assets --jq <the names | the zip's API URL>
+  "release view") # release view <tag> --json assets --jq <the names | one asset's API URL>
     case "$*" in
-      *apiUrl*) [ ! -e "$GHDIR/$3/puzzles-site-reports.zip" ] \
-        || echo "https://api.github.com/repos/puzzles-consulting/wp-site-reports/releases/assets/$(tr -cd 0-9 <<<"$3")" ;;
+      *apiUrl*) # an asset's id: its tag's digits, 0, and 1 (the zip), 2 (manifest.json) or 3 (owner.sig)
+        for k in 1:puzzles-site-reports.zip 2:manifest.json 3:owner.sig; do
+          [[ "$*" != *"\"${k#*:}\""* ]] || [ ! -e "$GHDIR/$3/${k#*:}" ] \
+            || echo "https://api.github.com/repos/puzzles-consulting/wp-site-reports/releases/assets/$(tr -cd 0-9 <<<"$3")0${k%%:*}"
+        done ;;
       *) ls "$GHDIR/$3" ;;
     esac ;;
-  "api repos/puzzles-consulting/wp-site-reports/releases/assets/"*) # an asset's bytes; its id is its tag's digits
-    for d in "$GHDIR"/v*/; do [ "$(basename "$d" | tr -cd 0-9)" != "${2##*/}" ] || exec cat "$d/puzzles-site-reports.zip"; done
+  "api repos/puzzles-consulting/wp-site-reports/releases/assets/"*) # an asset's bytes
+    [ -z "${GH_FAIL_ASSET:-}" ] || { echo "gh: HTTP 502" >&2; exit 1; }
+    id=${2##*/}; a=$(sed -n "${id: -1}p" <<<$'puzzles-site-reports.zip\nmanifest.json\nowner.sig')
+    for d in "$GHDIR"/v*/; do [ "$(basename "$d" | tr -cd 0-9)" != "${id%??}" ] || exec cat "$d/$a"; done
     exit 1 ;;
   *) echo "gh shim: unexpected call: $*" >&2; exit 97 ;;
 esac
@@ -85,18 +86,30 @@ with zipfile.ZipFile(path) as zin, zipfile.ZipFile(path + '.tmp', 'w') as zout:
     zout.writestr(i, data)
 shutil.move(path + '.tmp', path)
 EOF
-# zpatch.py <zip> <local-deflate|overlap>: the first local header claims deflate behind a central "stor", or the second
-# central entry points at the first entry's data too (overlapping entries)
+# zpatch.py <zip> <how>: one layout fault in an otherwise build.sh zip. local-deflate: the first local header claims
+# deflate behind a central "stor"; overlap: the second central entry points at the first entry; gap: four bytes
+# between the entries and the central directory; crc: a data byte changed; eocd: the end record's count on this disk
+# differs; central: the first central signature broken.
 cat >"$T/zpatch.py" <<'EOF'
 import struct, sys
 path, how = sys.argv[1:3]
 d = bytearray(open(path, 'rb').read())
+cdoff = struct.unpack('<I', d[-6:-2])[0]
 if how == 'local-deflate':
     struct.pack_into('<H', d, 8, 8)
-else:
-    cdoff = struct.unpack('<I', d[-6:-2])[0]
+elif how == 'overlap':
     nl, xl, ml = struct.unpack('<HHH', d[cdoff + 28:cdoff + 34])
     struct.pack_into('<I', d, cdoff + 46 + nl + xl + ml + 42, 0)
+elif how == 'gap':
+    d[cdoff:cdoff] = b'\0\0\0\0'
+    struct.pack_into('<I', d, len(d) - 6, cdoff + 4)
+elif how == 'crc':
+    nl = struct.unpack('<H', d[26:28])[0]
+    d[30 + nl] ^= 1
+elif how == 'eocd':
+    struct.pack_into('<H', d, len(d) - 14, struct.unpack('<H', d[-14:-12])[0] + 1)
+elif how == 'central':
+    d[cdoff] = 0
 open(path, 'wb').write(bytes(d))
 EOF
 # dualzip.py <shown.zip> <hidden.zip> <out>: one file, two central directories. Info-ZIP reads the last one (shown's
@@ -203,14 +216,23 @@ maincase "$PRE" "${KEYDEF}i \$pzr = array( 'k'=>include __DIR__ . '/includes/seo
 maincase "$PRE" "${KEYDEF}i define( 'PUZZLES_SR_UPDATE_PUBKEY', 'x' );" # a literal define of the key's name
 maincase "$PRE" 's|^ \* Author: .*| * Author: x */ $pzr = 1; /*|' # the header comment closed mid-line
 maincase 'needs its key on one top-level line' "${KEYDEF}{s/^/function puzzles_sr_k() { /;s/\$/ }/}"
-# Two central directories: every check sees the shown files, WordPress' PclZip would install the hidden ones.
+# Two central directories (Info-ZIP reads the shown files, WordPress' PclZip would install the hidden ones): refused at
+# the end record, which build.sh never follows with a comment.
 hidden() { echo '// hidden: installed, never reviewed' >>"$T/src/includes/seo.php"; }
 release v9.9.1 "$PUB1" hidden; cp "$(Z v9.9.1)" "$T/hidden.zip"
 "$PY" -I "$T/dualzip.py" "$T/v9.9.1.zip" "$T/hidden.zip" "$(Z v9.9.1)"
 [ "$(unzip -p "$(Z v9.9.1)" puzzles-site-reports/includes/seo.php | grep -c hidden || true)" = 0 ] # Info-ZIP shows the clean files
 refuses 'does not end in an end record without a comment' v9.9.1 6.8.1 --first
-fresh; "$PY" -I "$T/zpatch.py" "$(Z v9.9.1)" local-deflate; refuses 'has a local header that differs from its central entry' v9.9.1 6.8.1 --first
-fresh; "$PY" -I "$T/zpatch.py" "$(Z v9.9.1)" overlap; refuses 'are not one after another from its start' v9.9.1 6.8.1 --first
+zcase() { fresh; "$PY" -I "$T/zpatch.py" "$(Z v9.9.1)" "$2"; refuses "$1" v9.9.1 6.8.1 --first; } # zcase <expected> <how>
+zcase 'has a local header that differs from its central entry' local-deflate
+zcase 'are not one after another from its start' overlap
+zcase 'has bytes outside its entries and central directory' gap
+zcase 'fails its CRC' crc
+zcase 'has an end record that does not match its central directory' eocd
+zcase 'has a broken central directory' central
+zipcase 'has a name with a byte that is not printable ASCII' add $'puzzles-site-reports/a\nb.php'
+zipcase 'has a name with a byte that is not printable ASCII' add $'puzzles-site-reports/a\rb.php'
+zipcase 'has a name with a byte that is not printable ASCII' add $'puzzles-site-reports/caf\xc3\xa9.php'
 fresh; head -c $((5242880 + 1)) /dev/zero >>"$(Z v9.9.1)"; refuses 'is missing or over 5242880 bytes' v9.9.1 6.8.1 --first
 fresh; "$PY" -I -c '
 import sys, zipfile
@@ -239,7 +261,13 @@ term() { # term <typed answer> <args...>: the promoter on a terminal; prints its
     script -qec "$(printf '%q ' bash "$P" "$@")" /dev/null <<<"$a" | tr -d '\r'
 }
 latest() { [ "$(cat "$GHDIR/latest")" = "$1" ]; }
-no() { if "$@"; then echo "FAIL: not expected: $*" >&2; exit 1; fi; } # no <command...>: it must fail
+sign() { # sign <tag> <secret key>: a manifest and owner.sig for <tag>'s zip as it is now, both by that key
+  local sha m sig
+  sha=$(sha256sum "$(Z "$1")" | cut -c1-64); m="${1#v}"$'\n'"$sha"$'\n5.8\n7.4\n6.8.1'
+  sig=$(printf '%s\n%s' "$2" "$m" | php_run -r '$k = base64_decode( trim( fgets( STDIN ) ) ); echo base64_encode( sodium_crypto_sign_detached( stream_get_contents( STDIN ), $k ) );' | tr -d '\r')
+  printf '{"version":"%s","sha256":"%s","requires":"5.8","requires_php":"7.4","tested":"6.8.1","signature":"%s"}\n' "${1#v}" "$sha" "$sig" >"$GHDIR/$1/manifest.json"
+  printf '%s\n' "$sig" >"$GHDIR/$1/owner.sig"
+}
 snap() { rm -rf "$T/snap"; mkdir "$T/snap"; cp -r "$GHDIR" "$XDG_CONFIG_HOME" "$T/snap/"; }   # the releases and the notes, saved
 back() { rm -rf "$GHDIR" "$XDG_CONFIG_HOME"; mv "$T/snap/gh" "$GHDIR"; mv "$T/snap/cfg" "$XDG_CONFIG_HOME"; } # and restored
 NOTEF="$XDG_CONFIG_HOME/wp-sr-promote/promoted"; PULLEDF="$XDG_CONFIG_HOME/wp-sr-promote/pulled"
@@ -279,8 +307,10 @@ refuses 'is not the zip this machine promoted as v9.9.2' v9.9.3 6.8.1
 cp "$T/note" "$NOTEF"; mv "$GHDIR/v9.9.2/manifest.json" "$T/m"; echo v9.9.1 >"$GHDIR/latest" # pulled behind its back
 refuses 'is below 9.9.2, the highest release this machine promoted and did not pull' v9.9.3 6.8.1
 mv "$T/m" "$GHDIR/v9.9.2/manifest.json"; echo v9.9.2 >"$GHDIR/latest"
+snap; zedit add v9.9.2 'puzzles-site-reports/../evil.txt'; sign v9.9.2 "$SK1" # a baseline the owner signed, with a hostile name
+refuses "v9.9.2's zip has the entry 'puzzles-site-reports/../evil.txt'" v9.9.3 6.8.1; [ ! -e "$T/evil.txt" ]; back
 snap; o=$(term 9.9.3 v9.9.3 6.8.1) || { echo "$o"; exit 1; } # 9.9.1-9.9.3 promoted; 9.9.3 pulled; 9.9.2 hidden by an editor
-o=$(pull v9.9.3); latest v9.9.2; mv "$GHDIR/v9.9.2/manifest.json" "$T/m"; echo v9.9.1 >"$GHDIR/latest"
+pull v9.9.3 >/dev/null; latest v9.9.2; mv "$GHDIR/v9.9.2/manifest.json" "$T/m"; echo v9.9.1 >"$GHDIR/latest"
 release v9.9.4 "$PUB1"; refuses 'is below 9.9.2, the highest release this machine promoted and did not pull' v9.9.4 6.8.1
 back; release v9.9.3 "$PUB1"
 echo "ok: the baseline is the release you promoted last, as you promoted it, and GitHub's latest"
@@ -288,12 +318,14 @@ echo "ok: the baseline is the release you promoted last, as you promoted it, and
 # Pulled: pre-release, no manifest, noted here; the next release rolls forward from the one before it.
 mkdir "$T/nophp"; printf '#!/bin/sh\nexit 127\n' >"$T/nophp/php"; cp "$T/nophp/php" "$T/nophp/docker"; chmod +x "$T/nophp/"*
 o=$(PATH="$T/nophp:$T/bin:$PATH" bash "$P" pull v9.9.2 2>&1) && { echo "$o"; exit 1; }
-grep -qF 'pull needs php or Docker to tell a rotation release' <<<"$o"; [ -e "$GHDIR/v9.9.2/manifest.json" ]; latest v9.9.2
+grep -qF 'v9.9.2 is pre-release now, but telling whether it is a rotation release needs php or Docker' <<<"$o"
+[ -e "$GHDIR/v9.9.2/.pre" ]; [ -e "$GHDIR/v9.9.2/manifest.json" ]; latest v9.9.1; grep -qx 9.9.2 "$PULLEDF"
 o=$(pull v9.9.2); grep -qF 'pulled v9.9.2' <<<"$o"
 [ -e "$GHDIR/v9.9.2/.pre" ]; [ ! -e "$GHDIR/v9.9.2/manifest.json" ]; latest v9.9.1; grep -qx 9.9.2 "$PULLEDF"
 o=$(term 9.9.3 v9.9.3 6.8.1) || { echo "$o"; exit 1; }
 grep -qF 'baseline: v9.9.1 (' <<<"$o"; grep -qF 'promoted v9.9.3' <<<"$o"; latest v9.9.3; [ "$(tail -1 "$NOTEF" | cut -d' ' -f1)" = 9.9.3 ]
-grep -qF 'or than a release this machine pulled: 9.9.2' <<<"$o"
+grep -qF 'or than a release this machine pulled: 9.9.2.' <<<"$o"
+snap; pull v9.9.3 >/dev/null; refuses 'v9.9.2 is not newer than 9.9.3, which this machine pulled' v9.9.2 6.8.1; back
 echo "ok: a pull, then the next release rolls forward from the release before it"
 
 # A key rotation: the release ships the new key; the manifest is signed with the old one, owner.sig with the new one.
@@ -303,14 +335,20 @@ NSK=$SK2; o=$(term 9.9.4 v9.9.4 6.8.1 --rotate) || { echo "$o"; exit 1; }; NSK="
 grep -qF "sites that take v9.9.4 trust only $PUB2" <<<"$o"; latest v9.9.4; owner_sig_by v9.9.4 "$PUB2"
 [ "$(verify "$(cat "$GHDIR/v9.9.4/manifest.json")" "$(Z v9.9.3)")" = valid ] # sites on v9.9.3 take it
 echo "ok: a rotation"
+snap; pull v9.9.4 --delete-manifest >/dev/null; [ ! -e "$GHDIR/v9.9.4/manifest.json" ]; back # its manifest goes on request
+snap; cp "$GHDIR/v9.9.3/owner.sig" "$GHDIR/v9.9.4/owner.sig"; pull v9.9.4 >/dev/null # owner.sig not by the key it ships
+[ ! -e "$GHDIR/v9.9.4/manifest.json" ]; back
+snap; o=$(GH_FAIL_ASSET=1 pull v9.9.4) && { echo "$o"; exit 1; }; grep -qF "could not download v9.9.4's manifest.json" <<<"$o"; back
+echo "ok: pull keeps a manifest only for a rotation release it can prove, and fails loudly when it cannot read one"
 # Pulled by mistake: its manifest stays, and promoting it again (--rotate) puts it back.
 o=$(pull v9.9.4); grep -qF 'v9.9.4 is a rotation release: its manifest.json stays' <<<"$o"
 [ -e "$GHDIR/v9.9.4/manifest.json" ]; latest v9.9.3
 NSK=$SK2; o=$(term 9.9.4 v9.9.4 6.8.1 --rotate) || { echo "$o"; exit 1; }; NSK=""
-grep -qF 'baseline: v9.9.3 (' <<<"$o"; grep -qF 'promoted v9.9.4' <<<"$o"; latest v9.9.4; no grep -qx 9.9.4 "$PULLEDF"
+grep -qF 'baseline: v9.9.3 (' <<<"$o"; grep -qF 'promoted v9.9.4' <<<"$o"; latest v9.9.4
+if grep -qx 9.9.4 "$PULLEDF"; then echo "FAIL: v9.9.4 still noted as pulled" >&2; exit 1; fi
 echo "ok: a rotation release pulled by mistake is promoted again"
 # Pulled for good: one manifest serves one group of sites. Both choices, from the same state.
-o=$(pull v9.9.4); grep -qF 'pulled v9.9.4' <<<"$o"
+pull v9.9.4 >/dev/null
 snap
 release v9.9.5 "$PUB1"; o=$(term 9.9.5 v9.9.5 6.8.1) || { echo "$o"; exit 1; } # the sites on v9.9.3: the old key, as usual
 grep -qF 'baseline: v9.9.3 (' <<<"$o"; grep -qF 'promoted v9.9.5' <<<"$o"; owner_sig_by v9.9.5 "$PUB1"

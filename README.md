@@ -9,8 +9,7 @@ Requires WordPress 5.8+ and PHP 7.4+.
 ## Install
 
 Client sites get only promoted releases, installed by the portal's connect script, which checks the signed manifest.
-By hand, check the latest release's zip first with `wp-sr-promote verify vX.Y.Z <zip> <public key>` and the key sites
-trust (Release, below), then:
+By hand, check the latest release's zip first with `wp-sr-promote verify` (Release, below), then:
 
 ```bash
 wp plugin install puzzles-site-reports.zip --activate
@@ -81,9 +80,11 @@ highest release it promoted and did not pull; without the list (a new machine) i
 only. A promotion uploads `manifest.json` (signed with the key the sites trust) and
 `owner.sig`, and marks the release latest; a rerun finishes an interrupted one.
 
-- `verify vX.Y.Z <zip> <public key>` checks a zip against the release's signed manifest, read-only (gh signed in).
-  The key is the one sites trust: for a rotation release, the key of the release before it.
-- `pull vX.Y.Z` takes a release back (below). It needs php or Docker, like promoting.
+- `verify vX.Y.Z <zip> <public key>` checks a zip against the release's signed manifest, read-only (gh signed in, php
+  or Docker). The key is the one sites trust: `PUZZLES_SR_UPDATE_PUBKEY` in the release before it (for a rotation
+  release that is the old key).
+- `pull vX.Y.Z` takes a release back (below); telling a rotation release, unless `--delete-manifest`, needs php or
+  Docker.
 
 The signing key lives in the secret store (Bitwarden) plus one offline copy. Losing it means reinstalling the plugin
 on every site over SSH, since sites accept updates only from it. It is created by the promoter:
@@ -94,7 +95,8 @@ on every site over SSH, since sites accept updates only from it. It is created b
   release keeps it, below) and notes the pull on this machine: GitHub's latest falls back to the previous release,
   and no site is offered the bad one. Sites already on it are fixed only by rolling forward to `X.Y.Z+1`, promptly:
   anyone who can edit releases can mark it latest again while its old signed manifest exists somewhere (manifests do
-  not expire; that is a known, parked limit).
+  not expire; that is a known, parked limit). If it was the only release ever promoted, the next promotion needs
+  `--first` again.
 - Rotating the key: sites trust only the key in the version they run, so the new key ships in a release signed with
   the old one. Put the new public key in `PUZZLES_SR_UPDATE_PUBKEY`, release it, and promote it with `--rotate`, the
   old key in `PUZZLES_SR_SIGNING_KEY` and the new one in `PUZZLES_SR_NEW_SIGNING_KEY`; from then on promote with the
