@@ -12,7 +12,8 @@ bash tests/promote.sh                                     # promotions need scri
 ```
 
 `smoke.sh` tears its Docker stack down on exit, also on failure: never leave containers running. CI runs `php -l` on
-7.4 and 8.4 plus both tests.
+7.4 and 8.4 plus both tests. `main` is protected (PR with the CI checks required, no force-push), so CI runs on every
+PR, docs-only ones included (why: `ci.yml`).
 
 ## Hard rules
 
