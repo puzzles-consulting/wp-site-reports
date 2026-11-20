@@ -50,7 +50,7 @@ The tests (CI runs them): `bash scripts/build.sh <version> && bash tests/smoke.s
 Before a release: the portal accepts the new report shape and is deployed (a promotion reaches every site within
 hours).
 
-1. After `main`'s CI is green, tag `vX.Y.Z` on it and push the tag. `.github/workflows/release.yml` builds the zip,
+1. After `main`'s CI is green, tag `vX.Y.Z` (no leading zeros) on it and push the tag. `.github/workflows/release.yml` builds the zip,
    smoke-tests it and publishes it as a **pre-release**, with no manifest, so no site is offered it. That workflow only
    ever makes pre-releases.
 2. Check it on the canary, a remote site with no secrets, never from the machine you promote from
