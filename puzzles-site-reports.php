@@ -339,37 +339,81 @@ add_filter(
 
 // ---- Update-check freshness ----
 // Why: no transient shape tells an answered update check from a failed one, and any filter can rewrite stored offers
-// that a failed check then saves back. What: when api.wordpress.org answers core's own check (HTTP 200, the JSON key it
-// expects, the request made by wp_update_plugins/wp_update_themes/wp_version_check itself), the next save of that
+// that a failed check then saves back. What: when core's own check gets api.wordpress.org's answer (HTTP 200, the JSON
+// key it expects, the request made by wp_update_plugins/wp_update_themes/wp_version_check itself), the next save of that
 // transient, once, carries the time (`puzzles_sr_checked`) and its offers (`puzzles_sr_offers`): properties of core's
 // own transient, no option of ours. status.php reads them past the transient filters (contract: updatesCheckedAt).
+// The answer is seen in http_api_debug when core makes the request, and in pre_http_request (last) when a filter answers
+// it instead, but only if that answer is a real response http_api_debug saw while the filters ran (the same
+// `http_response` object): an update mirror (WP Engine's) requests its own URL and hands that response to core's check;
+// a canned answer, even one placed after a real request, is no answer.
 ( function () {
-	$check = array( 'plugins' => 'wp_update_plugins', 'themes' => 'wp_update_themes', 'core' => 'wp_version_check' );
-	$at    = array(); // [ type => when core's check of it was answered, in this request ], until its next save
+	$check  = array( 'plugins' => 'wp_update_plugins', 'themes' => 'wp_update_themes', 'core' => 'wp_version_check' );
+	$at     = array(); // [ type => when core's check of it was answered, in this request ], until its next save
+	$seen   = array(); // the http_response objects http_api_debug saw while a pre_http_request ran
+	$open   = array(); // count( $seen ) when each pre_http_request still running began: a stack, since requests nest
+	$answer = function ( $response, $url ) use ( &$at, $check ) {
+		if ( 200 !== wp_remote_retrieve_response_code( $response ) // strict, as core's checks
+			|| ! preg_match( '~^https?://api\.wordpress\.org/(plugins|themes|core)/(?:update|version)-check/~', (string) $url, $m ) ) {
+			return;
+		}
+		$body = json_decode( wp_remote_retrieve_body( $response ), true );
+		if ( ! isset( $body[ 'core' === $m[1] ? 'offers' : $m[1] ] ) ) {
+			return;
+		}
+		// The request must be core's own: the innermost WP_Http::request was entered through a wrapper (wp_remote_post,
+		// wp_safe_remote_get...: the first frame outside WP_Http) that core's check function called itself.
+		$trace = debug_backtrace( DEBUG_BACKTRACE_IGNORE_ARGS );
+		foreach ( $trace as $i => $frame ) {
+			if ( 'WP_Http' === ( $frame['class'] ?? '' ) && 'request' === $frame['function'] ) {
+				$j = $i + 1;
+				while ( 'WP_Http' === ( $trace[ $j ]['class'] ?? '' ) ) {
+					++$j;
+				}
+				if ( ( $trace[ $j + 1 ]['function'] ?? '' ) === $check[ $m[1] ] ) {
+					$at[ $m[1] ] = time();
+				}
+				return;
+			}
+		}
+	};
 	add_action(
 		'http_api_debug',
-		function ( $response, $context, $class, $args, $url ) use ( &$at, $check ) {
-			if ( 'response' !== $context || 200 !== (int) wp_remote_retrieve_response_code( $response )
-				|| ! preg_match( '~^https?://api\.wordpress\.org/(plugins|themes|core)/(?:update|version)-check/~', (string) $url, $m ) ) {
-				return;
-			}
-			$body = json_decode( wp_remote_retrieve_body( $response ), true );
-			if ( ! isset( $body[ 'core' === $m[1] ? 'offers' : $m[1] ] ) ) {
-				return;
-			}
-			// The request must be core's own: the caller of the innermost wp_remote_post/get is core's check function.
-			$trace = debug_backtrace( DEBUG_BACKTRACE_IGNORE_ARGS );
-			foreach ( $trace as $i => $frame ) {
-				if ( in_array( $frame['function'], array( 'wp_remote_post', 'wp_remote_get' ), true ) ) {
-					if ( ( $trace[ $i + 1 ]['function'] ?? '' ) === $check[ $m[1] ] ) {
-						$at[ $m[1] ] = time();
-					}
-					return;
+		function ( $response, $context, $class, $args, $url ) use ( $answer, &$open, &$seen ) {
+			if ( 'response' === $context ) {
+				if ( $open && is_array( $response ) && is_object( $response['http_response'] ?? null ) ) {
+					$seen[] = $response['http_response'];
 				}
+				$answer( $response, $url );
 			}
 		},
 		10,
 		5
+	);
+	add_filter(
+		'pre_http_request',
+		function ( $pre ) use ( &$open, &$seen ) {
+			$open[] = count( $seen );
+			return $pre;
+		},
+		PHP_INT_MIN
+	);
+	add_filter(
+		'pre_http_request',
+		function ( $pre, $args, $url ) use ( $answer, &$open, &$seen ) {
+			$start = array_pop( $open );
+			// false: nothing answered, core makes the request and http_api_debug sees the answer; a WP_Error is no answer
+			$real = null !== $start && is_array( $pre ) && in_array( $pre['http_response'] ?? null, array_slice( $seen, $start ), true );
+			if ( ! $open ) {
+				$seen = array();
+			}
+			if ( $real ) {
+				$answer( $pre, $url );
+			}
+			return $pre;
+		},
+		PHP_INT_MAX,
+		3
 	);
 	foreach ( array_keys( $check ) as $type ) {
 		add_filter(

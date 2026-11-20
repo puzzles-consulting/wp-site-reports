@@ -55,9 +55,14 @@ function puzzles_sr_offer_versions( string $type, $t ): array {
 	return $out;
 }
 
-/** An offered version only when it is above the installed one (contract). */
+/** Whether version $a is above $b, a leading "v" or "V" on either left out (contract). */
+function puzzles_sr_above( string $a, string $b ): bool {
+	return version_compare( ltrim( $a, 'vV' ), ltrim( $b, 'vV' ), '>' );
+}
+
+/** An offered version, as given, only when it is above the installed one (contract). */
 function puzzles_sr_newer( ?string $offer, string $installed ): ?string {
-	return null !== $offer && version_compare( $offer, $installed, '>' ) ? $offer : null;
+	return null !== $offer && puzzles_sr_above( $offer, $installed ) ? $offer : null;
 }
 
 /**
@@ -72,7 +77,7 @@ function puzzles_sr_offers( string $type ): array {
 		return array_merge( $out, $read );
 	}
 	foreach ( $read as $key => $v ) {
-		if ( ! isset( $out[ $key ] ) || version_compare( $v, (string) $out[ $key ], '>' ) ) {
+		if ( ! isset( $out[ $key ] ) || puzzles_sr_above( $v, (string) $out[ $key ] ) ) {
 			$out[ $key ] = $v;
 		}
 	}
@@ -169,6 +174,9 @@ function puzzles_sr_status(): array {
 
 	$all  = get_plugins();
 	$auto = (array) get_site_option( 'auto_update_plugins', array() );
+	require_once ABSPATH . 'wp-admin/includes/class-wp-automatic-updater.php'; // REST requests do not load it
+	// This plugin installs its own signed updates whenever WordPress' automatic updater can run (contract: autoUpdate).
+	$self = ( new WP_Automatic_Updater() )->is_disabled() ? '' : plugin_basename( dirname( __DIR__ ) . '/puzzles-site-reports.php' );
 	$list = array();
 	foreach ( $all as $file => $p ) {
 		$list[] = array(
@@ -177,7 +185,7 @@ function puzzles_sr_status(): array {
 			'version'    => (string) $p['Version'],
 			'active'     => is_plugin_active( $file ), // network-active counts
 			'update'     => puzzles_sr_newer( $plugin_offer[ $file ] ?? null, (string) $p['Version'] ),
-			'autoUpdate' => in_array( $file, $auto, true ),
+			'autoUpdate' => in_array( $file, $auto, true ) || $file === $self,
 		);
 	}
 
