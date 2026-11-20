@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Boots a throwaway WordPress, installs dist/puzzles-site-reports.zip and runs every case_* below.
 # Usage: bash scripts/build.sh <version> && bash tests/smoke.sh
+# The version matrix (ci.yml, smoke-matrix) sets WP_IMAGE and CLI_IMAGE (docker-compose.yml), EXPECT_PHP (the PHP minor
+# version /status must report; default 8.3) and RM_VERSION (the Rank Math version to install, `none` to skip its case).
 set -euo pipefail
 export MSYS_NO_PATHCONV=1 # Git Bash on Windows would rewrite /dist/... arguments passed to docker
 
@@ -26,6 +28,8 @@ wpcli core install --url=http://localhost:8080 --title=Smoke --admin_user=admin 
   --admin_password=admin --admin_email=admin@example.com --skip-email
 wpcli plugin install /dist/puzzles-site-reports.zip --activate --force
 wpcli core version | tr -d '\r\n' > out/wp-version.txt # the release's `tested`: the WordPress this run is on
+# No case may depend on the default theme: WordPress 5.8's, Twenty Twenty-One, is a theme the cases install and inspect.
+[ "$(wpcli theme list --status=active --field=name | tr -d '\r\n')" != twentytwentyone ] || wpcli theme activate twentytwenty
 
 put_mu() { # put_mu <file> <php>: writes a must-use plugin (base64 through wp eval, so no shell quoting reaches PHP)
   local b; b=$(printf '%s' "$2" | base64 | tr -d '\n')
@@ -201,7 +205,7 @@ case_status_fresh() { # no update check has run yet, then only failed ones
   t=$(fresh_token); [ "$(call status "$t")" = 200 ]
   jq -e '.companion.version == env.EXPECTED_VERSION' out/status.json
   jq -e '.wordpress.updatesCheckedAt == null and .updatesCheckedAt == null and ([.plugins[].update] | all(. == null))' out/status.json
-  jq -e '.php.version | test("^8\\.3\\.")' out/status.json
+  jq -e --arg v "${EXPECT_PHP:-8.3}" '.php.version | startswith($v + ".")' out/status.json
   jq -e '.plugins[] | select(.file == "puzzles-site-reports/puzzles-site-reports.php") | .active == true' out/status.json
   jq -e '.wordfence == null and .comments.defaultStatus == "open"' out/status.json
   ! grep -q '/var/www' out/status.json || return 1
@@ -237,7 +241,7 @@ case_status_later_failed_check() { # a check that fails after a good one moves t
 }
 
 case_status_wordfence_and_updates() {
-  wpcli plugin install wordfence --activate
+  wpcli plugin install wordfence ${WF_VERSION:+--version=$WF_VERSION} --activate
   wpcli plugin install akismet --version=5.0 --force
   wpcli plugin deactivate akismet || true
   wpcli plugin auto-updates enable akismet
@@ -296,6 +300,7 @@ Version: 1.2.3
   jq -e '.themes[] | select(.stylesheet == "123") | .parent == null and .name == "Numeric"' out/status.json
   jq -e '.mustUse[] | select(.file == "psr-test-mu.php") | . == {"file": "psr-test-mu.php", "name": "PSR Test MU", "version": "1.2.3"}' out/status.json
   jq -e '.comments.defaultStatus == "closed"' out/status.json
+  cp out/status.json out/status-full.json # the full answer, kept as a CI artifact
   jq -e '.wordfence.active == true and (.wordfence | keys | sort) == ["active","ignored","issues","lastScanAt","version"]' out/status.json
   # active but unreadable (forced through the test-only filter): null, while plugins[] still lists it active
   put_mu psr-wf.php '<?php add_filter( "puzzles_sr_wordfence_reader_ok", "__return_false" );'
@@ -319,7 +324,8 @@ case_seo_without_rank_math() {
 }
 
 case_seo_with_rank_math() {
-  wpcli plugin install seo-by-rank-math --activate
+  if [ "${RM_VERSION:-}" = none ]; then echo "skip: no Rank Math release supports this WordPress (RM_VERSION=none)"; return 0; fi
+  wpcli plugin install seo-by-rank-math ${RM_VERSION:+--version=$RM_VERSION} --activate
   a=$(wpcli post create --post_type=page --post_status=publish --post_title=About --porcelain | tr -d '\r\n')
   wpcli post meta update "$a" rank_math_focus_keyword 'roofing miami, roof repair'
   wpcli post meta update "$a" rank_math_seo_score 81
@@ -357,6 +363,7 @@ case_seo_with_rank_math() {
   jq -e --argjson e "$e" '.items[] | select(.id == $e) | .metaTitle == "Best & Roofing | Acme" and .metaDescription == "Fast \"repairs\" & more" and .focusKeywords == ["a","b"]' out/seo.json
   jq -e --argjson p "$p" '.items[] | select(.id == $p) | .type == "post" and .title == "News"' out/seo.json
   jq -e '[.items[] | select(.title == "Draft")] | length == 0' out/seo.json
+  cp out/seo.json out/seo-full.json # the full answer, kept as a CI artifact
   jq -e '[.items[] | .url == null or (.url | type == "string")] | all' out/seo.json
   jq -e '.types.page.truncated == false and .types.page.items == 306 and (.types | has("product") | not)' out/seo.json
   jq -e '([.items[] | select(.type == "page")] | length) == .types.page.items and (.items | length) == (.types.page.items + .types.post.items)' out/seo.json
@@ -477,4 +484,9 @@ for case_fn in "${CASES[@]}"; do # not $c: the cases set globals (case_seo_with_
   "$case_fn"
   echo "ok $case_fn"
 done
+# WP_DEBUG_LOG (docker-compose.yml): no warning, notice, deprecation or error from this plugin's own files
+if [ -f out/debug.log ] && grep -E 'PHP (Warning|Notice|Deprecated|Fatal error|Parse error)' out/debug.log | grep -q 'plugins/puzzles-site-reports/'; then
+  grep -E 'PHP (Warning|Notice|Deprecated|Fatal error|Parse error)' out/debug.log | grep 'plugins/puzzles-site-reports/' >&2
+  echo "FAIL: the plugin logged PHP problems (out/debug.log)" >&2; exit 1
+fi
 echo "smoke: all ${#CASES[@]} cases passed"
