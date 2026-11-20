@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Boots a throwaway WordPress, installs dist/puzzles-site-reports.zip and runs every case_* below.
 # Usage: bash scripts/build.sh <version> && bash tests/smoke.sh
+# The version matrix (ci.yml, smoke-matrix) sets WP_IMAGE and CLI_IMAGE (docker-compose.yml), EXPECT_PHP (the PHP minor
+# version /status must report; default 8.3) and RM_VERSION (the Rank Math version to install, `none` to skip its case).
 set -euo pipefail
 export MSYS_NO_PATHCONV=1 # Git Bash on Windows would rewrite /dist/... arguments passed to docker
 
@@ -9,6 +11,7 @@ EXPECTED_VERSION="$(cat ../dist/VERSION)" # written by scripts/build.sh
 export EXPECTED_VERSION
 
 mkdir -p out && chmod 777 out # the cli container writes here as www-data
+rm -f out/debug.log # this run's log only
 dc() { docker compose -f docker-compose.yml "$@"; }
 wpcli() { dc run --rm -T cli wp "$@"; }
 trap 'dc --profile cli down -v >/dev/null 2>&1 || true' EXIT
@@ -26,6 +29,8 @@ wpcli core install --url=http://localhost:8080 --title=Smoke --admin_user=admin 
   --admin_password=admin --admin_email=admin@example.com --skip-email
 wpcli plugin install /dist/puzzles-site-reports.zip --activate --force
 wpcli core version | tr -d '\r\n' > out/wp-version.txt # the release's `tested`: the WordPress this run is on
+# No case may depend on the default theme: WordPress 5.8's, Twenty Twenty-One, is a theme the cases install and inspect.
+[ "$(wpcli theme list --status=active --field=name | tr -d '\r\n')" != twentytwentyone ] || wpcli theme activate twentytwenty
 
 put_mu() { # put_mu <file> <php>: writes a must-use plugin (base64 through wp eval, so no shell quoting reaches PHP)
   local b; b=$(printf '%s' "$2" | base64 | tr -d '\n')
@@ -77,6 +82,18 @@ function puzzles_sr_test_download( $package, $plugin = null ) {
 	return ( is_wp_error( $r ) ? $r->get_error_code() : var_export( $r, true ) ) . " $left";
 }'
 put_mu psr-update.php "$mu"
+# answer() makes api.wordpress.org answer core's update checks: from inside the check's own request, as WP_Http would,
+# it fires http_api_debug with the answer and returns it (core then saves it). Inert while the option is unset.
+put_mu psr-answer.php '<?php
+add_filter( "pre_http_request", function ( $pre, $args, $url ) {
+	$a = get_option( "psr_answer" );
+	if ( false !== $pre || ! is_array( $a ) || ! preg_match( "~^https?://api[.]wordpress[.]org/(plugins|themes|core)/(update|version)-check/~", $url ) ) {
+		return $pre;
+	}
+	$r = array( "headers" => array(), "body" => $a["body"], "response" => array( "code" => (int) $a["code"], "message" => "" ), "cookies" => array(), "filename" => null );
+	do_action( "http_api_debug", $r, "response", "Requests", $args, $url );
+	return $r;
+}, 10, 3 );'
 
 # Apache may lag behind `core install` (which went through WP-CLI): wait until WordPress answers over HTTP.
 for _ in $(seq 1 40); do
@@ -96,20 +113,32 @@ base64url_decode() { # stdin -> stdout; re-pads and maps -_ to +/
 connect() { wpcli puzzles-site-reports connect --porcelain | tr -d '\r\n'; } # prints the connection string
 token_of() { local s="$1"; echo "${s#pzr1.}" | base64url_decode | jq -r .token; }
 fresh_token() { token_of "$(connect)"; } # rotates the connection, prints the new token
+ck() { head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n'; } # a fresh `_`: 32 hex, as the portal sends on every request
 call() { # call <route> [token] -> HTTP status; the body lands in out/<route>.json
   local h=(); [ -z "${2:-}" ] || h=(-H "X-Puzzles-Reports-Token: $2")
-  curl -s -o "out/$1.json" -w '%{http_code}' "${h[@]}" "http://localhost:8080/?rest_route=/puzzles-reports/v1/$1&_=$(date +%s%N)"
+  curl -s -o "out/$1.json" -w '%{http_code}' "${h[@]}" "http://localhost:8080/?rest_route=/puzzles-reports/v1/$1&_=$(ck)"
 }
 st() { [ "$(call status "$t")" = 200 ] && jq -e "$1" out/status.json; } # st <jq filter>: /status with token $t holds it
-delete_update_transients() { # forces the never-checked state
-  for t in update_core update_plugins update_themes; do wpcli transient delete "$t" --network >/dev/null 2>&1 || true; done
+answer() { # answer <code> <body> <php>: <php> runs while api.wordpress.org answers core's update checks with <code> <body>
+  wpcli eval "update_option( 'psr_answer', array( 'code' => $1, 'body' => base64_decode( '$(printf %s "$2" | base64 | tr -d '\n')' ) ) ); $3 delete_option( 'psr_answer' );" | tr -d '\r\n'
 }
-fake_checks() { # fake_checks <core offers 0|1> <plugins checked 0|1> <themes checked 0|1>: the transients as checks leave
-  # them, last checked at 1000 (core), 2000 (plugins) and 3000 (themes); hello.php is offered 9.9
+P_ANSWER='{"plugins":{"hello.php":{"slug":"hello-dolly","plugin":"hello.php","new_version":"9.9","package":"x"}},"translations":[],"no_update":[]}'
+stamped() { echo "echo (int) ! empty( get_site_option( '_site_transient_$1' )->puzzles_sr_checked );"; } # stamped <transient>: PHP that prints 1 when it is stamped
+stamp_after() { # stamp_after <code> <body> <plugins|themes|core>: 1 when core's check of it, so answered, stamps its transient
+  local fn=wp_update_$3; [ "$3" != core ] || fn=wp_version_check
+  answer "$1" "$2" "delete_site_transient( 'update_$3' ); $fn(); $(stamped "update_$3")"
+}
+delete_update_transients() { # forces the never-checked state
+  local n; for n in update_core update_plugins update_themes; do wpcli transient delete "$n" --network >/dev/null 2>&1 || true; done
+}
+fake_checks() { # fake_checks <core 0|1> <plugins 0|1> <themes 0|1>: each transient as core leaves it after an answered
+  # check (1: stamped at 1000 for core, 2000 for plugins, 3000 for themes, with its offers' snapshot) or after failed
+  # ones only (0: no stamp, no snapshot, no core offers). hello.php is offered 9.9 either way.
   wpcli eval "
-    set_site_transient( 'update_core', (object) array( 'last_checked' => 1000, 'version_checked' => get_bloginfo( 'version' ), 'updates' => $1 ? array( (object) array( 'response' => 'latest', 'current' => get_bloginfo( 'version' ) ) ) : array() ) );
-    set_site_transient( 'update_plugins', (object) array( 'last_checked' => 2000, 'checked' => $2 ? array( 'hello.php' => '0.1' ) : array(), 'response' => array( 'hello.php' => (object) array( 'new_version' => '9.9' ) ) ) );
-    set_site_transient( 'update_themes', (object) array( 'last_checked' => 3000, 'checked' => $3 ? array( 'twentytwentyfive' => '0.1' ) : array(), 'response' => array() ) );"
+    \$t = function ( \$ok, \$at, \$data, \$snap ) { return (object) ( array( 'last_checked' => \$at ) + \$data + ( \$ok ? array( 'puzzles_sr_checked' => \$at, 'puzzles_sr_offers' => \$snap ) : array() ) ); };
+    set_site_transient( 'update_core', \$t( $1, 1000, array( 'version_checked' => get_bloginfo( 'version' ), 'updates' => $1 ? array( (object) array( 'response' => 'latest', 'current' => get_bloginfo( 'version' ) ) ) : array() ), array() ) );
+    set_site_transient( 'update_plugins', \$t( $2, 2000, array( 'response' => array( 'hello.php' => (object) array( 'new_version' => '9.9' ) ) ), array( 'hello.php' => '9.9' ) ) );
+    set_site_transient( 'update_themes', \$t( $3, 3000, array( 'response' => array() ), array() ) );"
 }
 
 # ---- cases (plain functions; run in the fixed order of CASES at the bottom) ----
@@ -143,8 +172,15 @@ case_auth() {
   idx=$(curl -s 'http://localhost:8080/?rest_route=/')
   [ "$(echo "$idx" | jq -r '.namespaces | index("wp/v2") != null')" = true ]  # it is the real index
   [ "$(echo "$idx" | jq -r '[.namespaces[], (.routes | keys[])] | map(select(contains("puzzles-reports"))) | length')" = 0 ]
-  curl -s -D - -o /dev/null "http://localhost:8080/?rest_route=/puzzles-reports/v1/status&_=1" -H "X-Puzzles-Reports-Token: $t2" | grep -qi '^cache-control:.*no-store'
-  curl -s -D - -o /dev/null "http://localhost:8080/?rest_route=/puzzles-reports/v1/status&_=2" | grep -qi '^cache-control:.*no-store' # the 401 too
+  curl -s -D - -o /dev/null "http://localhost:8080/?rest_route=/puzzles-reports/v1/status&_=$(ck)" -H "X-Puzzles-Reports-Token: $t2" | grep -qi '^cache-control:.*no-store'
+  curl -s -D - -o /dev/null "http://localhost:8080/?rest_route=/puzzles-reports/v1/status&_=$(ck)" | grep -qi '^cache-control:.*no-store' # the 401 too
+  # the cache key: without `_`, or with anything but 32 lowercase hex, a valid token gets the same fixed 401 (an edge
+  # cache keyed by URL could otherwise serve the answer to anyone who asks the same URL)
+  for q in '' '&_=' '&_=1' "&_=ABCDEF0123456789ABCDEF0123456789" "&_=$(ck)0" "&_[]=$(ck)"; do
+    [ "$(curl -g -s -o out/ck.json -w '%{http_code}' -H "X-Puzzles-Reports-Token: $t2" "http://localhost:8080/?rest_route=/puzzles-reports/v1/status$q")" = 401 ]
+    [ "$(jq -r .code out/ck.json)" = puzzles_reports_unauthorized ]
+  done
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Puzzles-Reports-Token: $t2" "http://localhost:8080/?rest_route=/puzzles-reports/v1/seo")" = 401 ]
   o=$(wpcli puzzles-site-reports status)
   grep -q 'connected: yes' <<<"$o"
   [[ $o != *"$t2"* ]]
@@ -156,7 +192,7 @@ case_auth_locked_rest() { # another plugin refuses every unauthenticated REST re
   [ "$(curl -s -o /dev/null -w '%{http_code}' 'http://localhost:8080/?rest_route=/wp/v2/users')" = 401 ]  # the lock is on
   [ "$(call status "$t")" = 200 ]
   # core matches routes case-insensitively: so do the token bypass and the no-store header
-  ci='http://localhost:8080/?rest_route=/Puzzles-Reports/V1/status'
+  ci="http://localhost:8080/?rest_route=/Puzzles-Reports/V1/status&_=$(ck)"
   [ "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Puzzles-Reports-Token: $t" "$ci")" = 200 ]
   curl -s -D - -o /dev/null -H "X-Puzzles-Reports-Token: $t" "$ci" | grep -qi '^cache-control:.*no-store'
   # a missing or wrong token gets our own refusal, not the lock's, so the portal can tell the two apart
@@ -187,7 +223,7 @@ add_filter( "rest_post_dispatch", function ( $r ) {
 	return $r;
 }, 99 );'
   t=$(fresh_token)
-  h=$(curl -s -D - -o /dev/null -H "X-Puzzles-Reports-Token: $t" 'http://localhost:8080/?rest_route=/puzzles-reports/v1/status')
+  h=$(curl -s -D - -o /dev/null -H "X-Puzzles-Reports-Token: $t" "http://localhost:8080/?rest_route=/puzzles-reports/v1/status&_=$(ck)")
   grep -qi '^x-test-donotcachepage: 1' <<<"$h"; grep -qi '^x-test-litespeed-nocache: puzzles-site-reports' <<<"$h"
   h=$(curl -s -D - -o /dev/null 'http://localhost:8080/?rest_route=/puzzles-reports/v1/seo') # the 401 too
   grep -qi '^x-test-donotcachepage: 1' <<<"$h"
@@ -201,7 +237,7 @@ case_status_fresh() { # no update check has run yet, then only failed ones
   t=$(fresh_token); [ "$(call status "$t")" = 200 ]
   jq -e '.companion.version == env.EXPECTED_VERSION' out/status.json
   jq -e '.wordpress.updatesCheckedAt == null and .updatesCheckedAt == null and ([.plugins[].update] | all(. == null))' out/status.json
-  jq -e '.php.version | test("^8\\.3\\.")' out/status.json
+  jq -e --arg v "${EXPECT_PHP:-8.3}" '.php.version | startswith($v + ".")' out/status.json
   jq -e '.plugins[] | select(.file == "puzzles-site-reports/puzzles-site-reports.php") | .active == true' out/status.json
   jq -e '.wordfence == null and .comments.defaultStatus == "open"' out/status.json
   ! grep -q '/var/www' out/status.json || return 1
@@ -213,25 +249,113 @@ case_status_fresh() { # no update check has run yet, then only failed ones
   rm_mu psr-offline.php; delete_update_transients
 }
 
-case_status_checked_per_transient() { # core's check, and the plugin and theme checks, each judged on its own
+case_status_checked_per_transient() { # core's check, and the plugin and theme checks, each judged on its own stamp
   t=$(fresh_token)
   C='"1970-01-01T00:16:40Z"'; PT='"1970-01-01T00:33:20Z"' # core's 1000; plugins' 2000, older than themes' 3000
   fake_checks 1 1 1; st ".wordpress.updatesCheckedAt == $C and .updatesCheckedAt == $PT"
-  fake_checks 0 1 1; st ".wordpress.updatesCheckedAt == null and .wordpress.update == null and .updatesCheckedAt == $PT" # core's disabled
+  fake_checks 0 1 1; st ".wordpress.updatesCheckedAt == null and .wordpress.update == null and .updatesCheckedAt == $PT"
   fake_checks 1 0 1; st ".wordpress.updatesCheckedAt == $C and .updatesCheckedAt == null"
   fake_checks 1 1 0; st ".wordpress.updatesCheckedAt == $C and .updatesCheckedAt == null"
   fake_checks 1 1 1 # the theme check older than the plugin check: the older one counts
-  wpcli eval '$t = get_site_transient( "update_themes" ); $t->last_checked = 1500; set_site_transient( "update_themes", $t );'
+  wpcli eval '$t = get_site_transient( "update_themes" ); $t->puzzles_sr_checked = 1500; set_site_transient( "update_themes", $t );'
   st '.updatesCheckedAt == "1970-01-01T00:25:00Z"'
   delete_update_transients
 }
 
-case_status_later_failed_check() { # a check that fails after a good one moves the time and keeps the data
+case_status_check_stamp() { # the stamp: core's own check answered by api.wordpress.org, on the next save only
+  t=$(fresh_token)
+  o=$(stamp_after 200 "$P_ANSWER" plugins); [ "$o" = 1 ]
+  o=$(stamp_after 200 '{"themes":[],"translations":[],"no_update":[]}' themes); [ "$o" = 1 ]
+  o=$(stamp_after 200 '{"offers":[],"translations":[]}' core); [ "$o" = 1 ]
+  o=$(stamp_after 200 'not json' plugins); [ "$o" = 0 ]
+  o=$(stamp_after 200 '{"translations":[]}' core); [ "$o" = 0 ] # not the key it expects (offers)
+  o=$(stamp_after 500 "$P_ANSWER" plugins); [ "$o" = 0 ]
+  # the same answer to a request core's check did not make (another plugin asking the API itself): no stamp
+  o=$(answer 200 "$P_ANSWER" "delete_site_transient( 'update_plugins' ); wp_remote_post( 'https://api.wordpress.org/plugins/update-check/1.1/' ); set_site_transient( 'update_plugins', (object) array( 'last_checked' => time() ) ); $(stamped update_plugins)"); [ "$o" = 0 ]
+  # the same answer to a request another plugin makes from inside core's check (core's own request then fails): the
+  # next save gets no stamp, since core's check is not the caller of that request
+  put_mu psr-inner.php '<?php
+add_filter( "http_request_args", function ( $args, $url ) {
+	static $busy = false;
+	if ( ! $busy && false !== strpos( $url, "api.wordpress.org/plugins/update-check/" ) && false === strpos( $url, "psr=inner" ) ) {
+		$busy = true;
+		wp_remote_post( $url . "?psr=inner" );
+		$busy = false;
+	}
+	return $args;
+}, 10, 2 );
+add_filter( "pre_http_request", function ( $pre, $args, $url ) {
+	return false !== strpos( $url, "api.wordpress.org/plugins/update-check/" ) && false === strpos( $url, "psr=inner" ) ? new WP_Error( "psr_down", "down" ) : $pre;
+}, 5, 3 );'
+  o=$(answer 200 "$P_ANSWER" "delete_site_transient( 'update_plugins' ); wp_update_plugins(); set_site_transient( 'update_plugins', get_site_transient( 'update_plugins' ) ); $(stamped update_plugins)"); [ "$o" = 0 ]
+  rm_mu psr-inner.php
+  # once: an answer stamps the next save only, never a transient rebuilt later in the same request (as after
+  # `wp plugin update`, whose re-check then fails)
+  o=$(answer 200 "$P_ANSWER" "delete_site_transient( 'update_plugins' ); wp_update_plugins(); $(stamped update_plugins) delete_site_transient( 'update_plugins' ); update_option( 'psr_answer', array( 'code' => 500, 'body' => '' ) ); wp_update_plugins(); $(stamped update_plugins)")
+  [ "$o" = 10 ]
+  st '.updatesCheckedAt == null'
+  # an external object cache: read from its site-transient group
+  o=$(wpcli eval 'wp_using_ext_object_cache( true ); wp_cache_set( "update_plugins", (object) array( "puzzles_sr_checked" => 1234 ), "site-transient" ); wp_cache_set( "update_themes", (object) array( "puzzles_sr_checked" => 5678 ), "site-transient" ); echo puzzles_sr_checked_at( "update_plugins", "update_themes" ); wp_using_ext_object_cache( false );' | tr -d '\r\n')
+  [ "$o" = 1970-01-01T00:20:34Z ]
+  delete_update_transients
+}
+
+case_status_offers() { # offers: the answered check's snapshot, plus what a filter adds on read; never hidden
+  t=$(fresh_token)
+  # an answered plugin check snapshots hello.php's offer; then a "freeze" filter hides it on read (and adds one for
+  # akismet), and a failed check saves that filtered object back: the snapshot still shows the offer
+  fake_checks 1 1 1
+  o=$(answer 200 "$P_ANSWER" "delete_site_transient( 'update_plugins' ); wp_update_plugins(); echo wp_json_encode( get_site_option( '_site_transient_update_plugins' )->puzzles_sr_offers );"); [ "$o" = '{"hello.php":"9.9"}' ]
+  put_mu psr-freeze.php '<?php add_filter( "site_transient_update_plugins", function ( $v ) { if ( is_object( $v ) ) { unset( $v->response["hello.php"] ); $v->response["akismet/akismet.php"] = (object) array( "new_version" => "77.0" ); } return $v; } );'
+  offline
+  wpcli eval 'wp_update_plugins( array( "psr" => 1 ) );' # extra stats: it checks although the last answer is recent
+  [ "$(wpcli eval 'echo (int) isset( get_site_option( "_site_transient_update_plugins" )->response["hello.php"] );' | tr -d '\r\n')" = 0 ] # stored without it now
+  st '([.plugins[] | select(.file == "hello.php") | .update] == ["9.9"]) and ([.plugins[] | select(.file == "akismet/akismet.php") | .update] == ["77.0"]) and .updatesCheckedAt != null'
+  rm_mu psr-offline.php; rm_mu psr-freeze.php
+  # no snapshot (plugins never answered): the offers are the filtered read, and the time is unknown
+  fake_checks 1 0 1
+  st '([.plugins[] | select(.file == "hello.php") | .update] == ["9.9"]) and .updatesCheckedAt == null'
+  # an offer not above the installed version (hello.php is 1.7.2) is no update
+  put_mu psr-lower.php '<?php add_filter( "site_transient_update_plugins", function ( $v ) { if ( is_object( $v ) ) { $v->response["hello.php"] = (object) array( "new_version" => "1.0" ); } return $v; } );'
+  st '[.plugins[] | select(.file == "hello.php") | .update] == [null]'
+  rm_mu psr-lower.php
+  # a snapshot never shadows a higher offer read later (hello.php snapshotted at 9.9, read at 10.1)
+  fake_checks 1 1 1
+  put_mu psr-raise.php '<?php add_filter( "site_transient_update_plugins", function ( $v ) { if ( is_object( $v ) ) { $v->response["hello.php"] = (object) array( "new_version" => "10.1" ); } return $v; } );'
+  st '[.plugins[] | select(.file == "hello.php") | .update] == ["10.1"]'
+  rm_mu psr-raise.php
+  # ...and a lower one read later never lowers it (read at 9.0: still 9.9)
+  put_mu psr-lower.php '<?php add_filter( "site_transient_update_plugins", function ( $v ) { if ( is_object( $v ) ) { $v->response["hello.php"] = (object) array( "new_version" => "9.0" ); } return $v; } );'
+  st '[.plugins[] | select(.file == "hello.php") | .update] == ["9.9"]'
+  rm_mu psr-lower.php
+  # an update disabler answering core's transient on read: the stored stamp is not refreshed, the snapshot still offers
+  wpcli eval 'set_site_transient( "update_core", (object) array( "last_checked" => 1000, "version_checked" => get_bloginfo( "version" ), "updates" => array(), "puzzles_sr_checked" => 1000, "puzzles_sr_offers" => array( "99.0", "100.0" ) ) );'
+  put_mu psr-disabler.php '<?php add_filter( "pre_site_transient_update_core", function () { return (object) array( "last_checked" => time(), "version_checked" => get_bloginfo( "version" ), "updates" => array() ); } );'
+  wpcli eval 'wp_version_check();'
+  st '.wordpress.updatesCheckedAt == "1970-01-01T00:16:40Z" and .wordpress.update == "100.0"'
+  rm_mu psr-disabler.php; delete_update_transients
+}
+
+case_status_updater_response() { # what updaters add to a failed check (`response`, `translations`) is no answer
+  t=$(fresh_token)
+  fake_checks 1 1 1; wpcli transient delete update_plugins --network # themes answered; plugins never checked yet
+  put_mu psr-updater.php '<?php
+$psr = function ( $v ) { $v = is_object( $v ) ? $v : new stdClass(); $v->response = array( "psr-other/psr-other.php" => (object) array( "new_version" => "2.0" ) ); $v->translations = array(); return $v; };
+add_filter( "site_transient_update_plugins", $psr );        // on read, as Plugin Update Checker
+add_filter( "pre_set_site_transient_update_plugins", $psr ); // on save, as EDD (`response`) and WooCommerce (`translations`)'
+  offline
+  wpcli eval 'wp_update_plugins();' # fails: only last_checked, plus what the updaters add
+  [ "$(wpcli eval '$t = get_site_option( "_site_transient_update_plugins" ); echo (int) ( isset( $t->response ) && property_exists( $t, "translations" ) );' | tr -d '\r\n')" = 1 ] # their junk is stored
+  st '.updatesCheckedAt == null'
+  rm_mu psr-offline.php; rm_mu psr-updater.php; delete_update_transients
+}
+
+case_status_later_failed_check() { # a check that fails after an answered one keeps the answer's time and data
   t=$(fresh_token)
   fake_checks 1 1 1
   offline
   wpcli eval 'wp_update_plugins(); wp_update_themes(); wp_version_check();'
-  st '(.wordpress.updatesCheckedAt | . != null and . != "1970-01-01T00:16:40Z") and (.updatesCheckedAt | . != null and . != "1970-01-01T00:33:20Z")'
+  st '.wordpress.updatesCheckedAt == "1970-01-01T00:16:40Z" and .updatesCheckedAt == "1970-01-01T00:33:20Z"'
   st '.plugins[] | select(.file == "hello.php") | .update == "9.9"'
   rm_mu psr-offline.php; delete_update_transients
 }
@@ -296,6 +420,7 @@ Version: 1.2.3
   jq -e '.themes[] | select(.stylesheet == "123") | .parent == null and .name == "Numeric"' out/status.json
   jq -e '.mustUse[] | select(.file == "psr-test-mu.php") | . == {"file": "psr-test-mu.php", "name": "PSR Test MU", "version": "1.2.3"}' out/status.json
   jq -e '.comments.defaultStatus == "closed"' out/status.json
+  cp out/status.json out/status-full.json # the full answer, kept as a CI artifact
   jq -e '.wordfence.active == true and (.wordfence | keys | sort) == ["active","ignored","issues","lastScanAt","version"]' out/status.json
   # active but unreadable (forced through the test-only filter): null, while plugins[] still lists it active
   put_mu psr-wf.php '<?php add_filter( "puzzles_sr_wordfence_reader_ok", "__return_false" );'
@@ -313,13 +438,28 @@ Version: 1.2.3
   wpcli option update default_comment_status open
 }
 
+case_wordfence_user_names() { # issues whose Wordfence text names a user leave with a fixed text instead
+  wpcli plugin activate wordfence
+  wpcli eval '
+    $i = wfIssues::shared();
+    $i->addIssue( "easyPassword", 100, "psr-u1", "psr-u1", "User \"psr-secret-login\" with \u0027subscriber\u0027 access has a very easy password.", "long", array( "user_login" => "psr-secret-login" ) );
+    $i->addIssue( "suspiciousAdminUsers", 75, "psr-u2", "psr-u2", "An admin user with the username psr-secret-admin was created outside of WordPress.", "long", array() );'
+  t=$(fresh_token); [ "$(call status "$t")" = 200 ]
+  jq -e '.wordfence.issues[] | select(.type == "easyPassword") | .shortMsg == "A user has an easy password."' out/status.json
+  jq -e '.wordfence.issues[] | select(.type == "suspiciousAdminUsers") | .shortMsg == "An admin user was created outside WordPress or has a suspicious username."' out/status.json
+  ! grep -q 'psr-secret' out/status.json || return 1
+  wpcli eval 'global $wpdb; $wpdb->query( "DELETE FROM " . wfIssues::shared()->getIssuesTable() . " WHERE type IN (\"easyPassword\", \"suspiciousAdminUsers\")" );'
+  wpcli plugin deactivate wordfence
+}
+
 case_seo_without_rank_math() {
   t=$(fresh_token); [ "$(call seo "$t")" = 200 ]
   jq -e '.plugin == null and .items == []' out/seo.json
 }
 
 case_seo_with_rank_math() {
-  wpcli plugin install seo-by-rank-math --activate
+  if [ "${RM_VERSION:-}" = none ]; then echo "skip: no Rank Math release supports this WordPress (RM_VERSION=none)"; return 0; fi
+  wpcli plugin install seo-by-rank-math ${RM_VERSION:+--version=$RM_VERSION} --activate
   a=$(wpcli post create --post_type=page --post_status=publish --post_title=About --porcelain | tr -d '\r\n')
   wpcli post meta update "$a" rank_math_focus_keyword 'roofing miami, roof repair'
   wpcli post meta update "$a" rank_math_seo_score 81
@@ -342,11 +482,17 @@ case_seo_with_rank_math() {
     update_post_meta( $id, "_elementor_data", str_repeat( "x", 200000 ) );
     update_post_meta( $id, "psr_seed", 1 );
   }'
+  # and 48 pages of ~500 KB content each (a builder's markup). Priming briefly holds each chunk twice (the query's
+  # buffer and its rows): 20 at a time stays under the bound below, 100 at a time (1.0.0) crosses it
+  wpcli eval 'for ( $i = 0; $i < 48; $i++ ) {
+    $id = wp_insert_post( array( "post_type" => "page", "post_status" => "publish", "post_title" => "Big $i", "post_content" => str_repeat( "x", 500000 ) ) );
+    update_post_meta( $id, "psr_seed", 1 );
+  }'
   # the same process reports the pages it read, so the memory figure is of a real report
   o=$(wpcli eval 'require_once ABSPATH . "wp-admin/includes/plugin.php"; $b = memory_get_usage(); $r = puzzles_sr_seo(); echo $r["types"]["page"]["items"], " ", memory_get_peak_usage() - $b;' | tr -d '\r\n')
   echo "seo: ${o% *} pages, peak memory over baseline ${o#* } bytes"
-  [ "${o% *}" = 306 ]
-  [ "${o#* }" -lt 33554432 ] # under 32 MB; loading the seeded meta alone would be ~60 MB
+  [ "${o% *}" = 354 ]
+  [ "${o#* }" -lt 33554432 ] # under 32 MB; loading the seeded meta alone would be ~60 MB, the 48 big pages at once ~48 MB
 
   t=$(fresh_token); [ "$(call seo "$t")" = 200 ]
   jq -e '.plugin.name == "rank_math" and (.plugin.version | type == "string" and length > 0)' out/seo.json
@@ -357,17 +503,28 @@ case_seo_with_rank_math() {
   jq -e --argjson e "$e" '.items[] | select(.id == $e) | .metaTitle == "Best & Roofing | Acme" and .metaDescription == "Fast \"repairs\" & more" and .focusKeywords == ["a","b"]' out/seo.json
   jq -e --argjson p "$p" '.items[] | select(.id == $p) | .type == "post" and .title == "News"' out/seo.json
   jq -e '[.items[] | select(.title == "Draft")] | length == 0' out/seo.json
+  cp out/seo.json out/seo-full.json # the full answer, kept as a CI artifact
   jq -e '[.items[] | .url == null or (.url | type == "string")] | all' out/seo.json
-  jq -e '.types.page.truncated == false and .types.page.items == 306 and (.types | has("product") | not)' out/seo.json
+  jq -e '.types.page.truncated == false and .types.page.items == 354 and (.types | has("product") | not)' out/seo.json
   jq -e '([.items[] | select(.type == "page")] | length) == .types.page.items and (.items | length) == (.types.page.items + .types.post.items)' out/seo.json
-  # Left for later cases: Rank Math active and the hand-made posts; the 300 seeded pages are deleted to keep the site light.
+  # Left for later cases: Rank Math active and the hand-made posts; the seeded pages are deleted to keep the site light.
   wpcli eval 'foreach ( get_posts( array( "post_type" => "page", "post_status" => "any", "meta_key" => "psr_seed", "numberposts" => -1, "fields" => "ids" ) ) as $id ) { wp_delete_post( $id, true ); }'
+}
+
+case_auto_update_email() { # a successful automatic update of only this plugin sends no email; anything else does
+  # e <plugin files, PHP list> [result]: the filter on one batch, every update with that result (default true: success)
+  e() { wpcli eval "echo (int) apply_filters( 'auto_plugin_update_send_email', true, array_map( function ( \$p ) { return (object) array( 'item' => (object) array( 'plugin' => \$p ), 'result' => ${2:-true} ); }, array( $1 ) ) );" | tr -d '\r\n'; }
+  o=$(e '"puzzles-site-reports/puzzles-site-reports.php"'); [ "$o" = 0 ]
+  o=$(e '"puzzles-site-reports/puzzles-site-reports.php", "akismet/akismet.php"'); [ "$o" = 1 ]
+  o=$(e '"akismet/akismet.php"'); [ "$o" = 1 ]
+  o=$(e ''); [ "$o" = 1 ]
+  o=$(e '"puzzles-site-reports/puzzles-site-reports.php"' 'new WP_Error( "puzzles_sr_bad_package", "x" )'); [ "$o" = 1 ] # a failed self-update
 }
 
 case_update_offer() { # manifests signed by this run's throwaway key, served by the wp container (reached as http://wp)
   ours=puzzles-site-reports/puzzles-site-reports.php
-  # the release zip asks GitHub (offline here): no offer, core's answer untouched
-  [ "$(wpcli eval "echo wp_json_encode( puzzles_sr_update_offer( 'input', array( 'Version' => '1.0.0' ), '$ours', array() ) );" | tr -d '\r\n')" = '"input"' ]
+  # the release zip asks GitHub (offline here): no offer (false)
+  [ "$(wpcli eval "echo wp_json_encode( puzzles_sr_update_offer( 'input', array( 'Version' => '1.0.0' ), '$ours', array() ) );" | tr -d '\r\n')" = false ]
   # from here on, the test build: the same tree with its update constants pointed at this stack and this run's key
   wpcli plugin install /out/testzip/puzzles-site-reports.zip --force --activate
   wpcli eval 'echo PUZZLES_SITE_REPORTS_MANIFEST_URL;' | grep -qx 'http://wp/test-manifest.json'
@@ -384,7 +541,7 @@ case_update_offer() { # manifests signed by this run's throwaway key, served by 
   }
   check() { wpcli transient delete update_plugins --network; wpcli eval 'wp_update_plugins();'; }
   offered() { wpcli plugin list --name=puzzles-site-reports --field=update_version | tr -d '\r\n'; }
-  filter() { # filter <installed-version> <plugin-file>: our update filter called directly; "input" is what core handed in
+  filter() { # filter <installed-version> <plugin-file>: our update filter called directly; "input" is what an earlier filter handed in
     wpcli eval "echo wp_json_encode( puzzles_sr_update_offer( 'input', array( 'Version' => '$1' ), '$2', array() ) );" | tr -d '\r\n'
   }
   download() { wpcli eval "echo puzzles_sr_test_download( '${1:-$pkg}'${2:+, '$2'} );" | tr -d '\r\n'; } # download [package] [hook_extra plugin]: see the setup mu-plugin
@@ -392,7 +549,7 @@ case_update_offer() { # manifests signed by this run's throwaway key, served by 
     check
     local o f; o=$(offered); f=$(filter 1.0.0 "$ours")
     [ -z "$o" ]
-    [ "$f" = '"input"' ]
+    [ "$f" = false ]
   }
   marker() { wpcli eval 'echo (int) file_exists( WP_PLUGIN_DIR . "/puzzles-site-reports/psr-marker" );' | tr -d '\r\n'; } # 1 until an install replaces the folder
   update_fails() { # a real `wp plugin update` fails and installs nothing; its output lands in out/update.log
@@ -402,6 +559,10 @@ case_update_offer() { # manifests signed by this run's throwaway key, served by 
   }
 
   not_offered # no manifest yet (WordPress answers its 404)
+  put_mu psr-hostile.php '<?php add_filter( "update_plugins_github.com", function ( $u, $d, $f ) { return "puzzles-site-reports/puzzles-site-reports.php" === $f ? array( "slug" => "puzzles-site-reports", "version" => "9.9.9", "package" => "https://github.com/puzzles-consulting/wp-site-reports/archive/refs/heads/main.zip" ) : $u; }, 5, 3 );'
+  not_offered # an earlier filter's offer for our file is dropped
+  o=$(wpcli eval '$o = get_site_transient( "update_plugins" )->response["puzzles-site-reports/puzzles-site-reports.php"] ?? null; echo null === $o ? "none" : "offered";' | tr -d '\r\n'); [ "$o" = none ]
+  rm_mu psr-hostile.php
 
   # signed: offered, and the package is the sentinel of the signed version and sha256 (a `package` field is ignored)
   manifest 9.9.9 "$sha" "$KP" "'package' => 'http://evil.example/x.zip'"
@@ -410,9 +571,10 @@ case_update_offer() { # manifests signed by this run's throwaway key, served by 
   o=$(wpcli eval 'echo get_site_transient( "update_plugins" )->response["puzzles-site-reports/puzzles-site-reports.php"]->package;' | tr -d '\r\n')
   [ "$o" = "$pkg" ]
   f=$(filter 1.0.0 "$ours"); [ "$f" != '"input"' ]; [[ $f != *evil* ]]   # the offer is real...
-  f=$(filter 99.0.0 "$ours"); [ "$f" = '"input"' ]                        # ...but not when the installed version is not older
+  f=$(filter 99.0.0 "$ours"); [ "$f" = false ]                            # ...but not when the installed version is not older
   f=$(filter 1.0.0 akismet/akismet.php); [ "$f" = '"input"' ]             # ...and never for another plugin's file
-  wpcli eval 'echo (int) apply_filters("auto_update_plugin", false, (object) ["plugin" => "puzzles-site-reports/puzzles-site-reports.php"]);' | grep -qx 1
+  wpcli eval 'echo (int) apply_filters("auto_update_plugin", false, (object) ["plugin" => "puzzles-site-reports/puzzles-site-reports.php", "package" => "puzzles-sr://9.9.9/'"$sha"'"]);' | grep -qx 1
+  wpcli eval 'echo (int) apply_filters("auto_update_plugin", false, (object) ["plugin" => "puzzles-site-reports/puzzles-site-reports.php", "package" => "https://github.com/puzzles-consulting/wp-site-reports/archive/refs/heads/main.zip"]);' | grep -qx 0
   wpcli eval 'echo (int) apply_filters("auto_update_plugin", false, (object) ["plugin" => "akismet/akismet.php"]);' | grep -qx 0
   # the download hook maps the sentinel to the release zip and accepts it (one temp file, handed to core); a malformed
   # sentinel is refused; any other package, or our sentinel while core updates another plugin, is core's
@@ -421,6 +583,7 @@ case_update_offer() { # manifests signed by this run's throwaway key, served by 
   o=$(download 'puzzles-sr://9.9.9/nothex'); [ "$o" = "puzzles_sr_bad_package 0" ]
   o=$(download http://wp/releases/download/v9.9.9/puzzles-site-reports.zip); [ "$o" = "false 0" ]
   o=$(download "$pkg" akismet/akismet.php); [ "$o" = "false 0" ]
+  o=$(download https://github.com/puzzles-consulting/wp-site-reports/archive/refs/heads/main.zip "$ours"); [ "$o" = "puzzles_sr_not_signed 0" ]
   # a download over the size limit is cut there, so it fails even its own sha256, and its temp file is deleted
   big=$(wpcli eval '$d = ABSPATH . "releases/download/v9.9.8"; wp_mkdir_p( $d ); file_put_contents( "$d/puzzles-site-reports.zip", str_repeat( "x", PUZZLES_SITE_REPORTS_MAX_PACKAGE + 1 ) ); echo hash_file( "sha256", "$d/puzzles-site-reports.zip" );' | tr -d '\r\n')
   o=$(download "puzzles-sr://9.9.8/$big"); [ "$o" = "puzzles_sr_bad_package 0" ]
@@ -477,4 +640,11 @@ for case_fn in "${CASES[@]}"; do # not $c: the cases set globals (case_seo_with_
   "$case_fn"
   echo "ok $case_fn"
 done
+# WP_DEBUG_LOG (docker-compose.yml): no warning, notice, deprecation or error from this plugin's own files
+# One grep, no pipe: under pipefail, `grep | grep -q` on a large log fails with SIGPIPE and the check would pass.
+[ -f out/debug.log ] || { echo "FAIL: no out/debug.log (WP_DEBUG_LOG is off?)" >&2; exit 1; }
+bad=$(grep -E 'PHP (Warning|Notice|Deprecated|Fatal error|Parse error).*plugins/puzzles-site-reports/' out/debug.log || true)
+if [ -n "$bad" ]; then
+  printf '%s\n' "$bad" >&2; echo "FAIL: the plugin logged PHP problems (out/debug.log)" >&2; exit 1
+fi
 echo "smoke: all ${#CASES[@]} cases passed"

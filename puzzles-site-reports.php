@@ -3,7 +3,7 @@
  * Plugin Name:       Puzzles Site Reports
  * Plugin URI:        https://github.com/puzzles-consulting/wp-site-reports
  * Description:       Read-only status and SEO reports of this WordPress site for Puzzles' client reports.
- * Version:           1.0.0
+ * Version:           1.0.1
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            Puzzles
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'PUZZLES_SITE_REPORTS_VERSION', '1.0.0' );
+define( 'PUZZLES_SITE_REPORTS_VERSION', '1.0.1' );
 define( 'PUZZLES_SITE_REPORTS_OPTION', 'puzzles_site_reports_token' );
 define( 'PUZZLES_SITE_REPORTS_NAMESPACE', 'puzzles-reports/v1' );
 // The self-update's constants ("Self-update" below), defined before any other file is loaded, so that none can define
@@ -97,9 +97,15 @@ function puzzles_sr_unauthorized(): WP_Error {
 	return new WP_Error( 'puzzles_reports_unauthorized', 'Not authorized.', array( 'status' => 401 ) );
 }
 
+/** `_` is 32 lowercase hex, fresh per request, so an edge cache keyed by URL never serves a report to another (contract). */
+function puzzles_sr_cache_key_ok( $v ): bool {
+	return is_string( $v ) && 1 === preg_match( '/^[0-9a-f]{32}\z/', $v );
+}
+
 /** @return true|WP_Error */
 function puzzles_sr_authorized( WP_REST_Request $request ) {
-	return puzzles_sr_token_valid( $request->get_header( 'X-Puzzles-Reports-Token' ) ) ? true : puzzles_sr_unauthorized();
+	return puzzles_sr_cache_key_ok( $request->get_query_params()['_'] ?? null )
+		&& puzzles_sr_token_valid( $request->get_header( 'X-Puzzles-Reports-Token' ) ) ? true : puzzles_sr_unauthorized();
 }
 
 function puzzles_sr_register_route( string $route, callable $callback ): void {
@@ -176,7 +182,8 @@ add_filter(
 			return $result;
 		}
 		puzzles_sr_no_page_cache();
-		return puzzles_sr_token_valid( $_SERVER['HTTP_X_PUZZLES_REPORTS_TOKEN'] ?? '' ) ? true : puzzles_sr_unauthorized();
+		return puzzles_sr_cache_key_ok( $_GET['_'] ?? null ) && puzzles_sr_token_valid( $_SERVER['HTTP_X_PUZZLES_REPORTS_TOKEN'] ?? '' )
+			? true : puzzles_sr_unauthorized();
 	},
 	999
 );
@@ -191,7 +198,7 @@ add_action(
 
 // ---- Self-update from GitHub Releases, signed ----
 // Core runs the offer only inside its own update check (cron or admin), never on a front-end request, and caches the
-// answer in the update_plugins transient, so nothing is cached here. Any failure leaves WordPress' answer untouched.
+// answer in the update_plugins transient, so nothing is cached here. Any failure means no offer for this plugin.
 // A manifest counts only when its Ed25519 signature over all its fields verifies with PUZZLES_SR_UPDATE_PUBKEY (top of
 // this file), and the package is installed only when it hashes to the signed sha256. The signing key never lives in
 // GitHub (README, Release): write access to the repository alone cannot ship a zip to the sites.
@@ -233,18 +240,21 @@ function puzzles_sr_verified_manifest( string $body ): ?array {
 	}
 }
 
-/** Core's `update_plugins_github.com` filter (the header's Update URI host). Only answers for this plugin. */
+/**
+ * Core's `update_plugins_github.com` filter (the header's Update URI host). For this plugin it answers our verified offer
+ * or none (false), never what an earlier filter put in $update; every other plugin's answer passes through.
+ */
 function puzzles_sr_update_offer( $update, $plugin_data, $plugin_file ) {
 	if ( plugin_basename( __FILE__ ) !== $plugin_file ) {
 		return $update;
 	}
 	$res = wp_remote_get( PUZZLES_SITE_REPORTS_MANIFEST_URL, array( 'timeout' => wp_doing_cron() ? 10 : 3, 'limit_response_size' => 4096 ) );
 	if ( is_wp_error( $res ) || 200 !== (int) wp_remote_retrieve_response_code( $res ) ) {
-		return $update;
+		return false;
 	}
 	$m = puzzles_sr_verified_manifest( wp_remote_retrieve_body( $res ) );
 	if ( ! $m || ! version_compare( $m['version'], (string) $plugin_data['Version'], '>' ) ) {
-		return $update;
+		return false;
 	}
 	return array(
 		'slug'         => 'puzzles-site-reports',
@@ -263,12 +273,15 @@ add_filter( 'update_plugins_github.com', 'puzzles_sr_update_offer', 10, 3 );
 /**
  * Core's download step for this plugin's sentinel package: the release zip, returned only if it hashes to the signed
  * sha256. At most PUZZLES_SITE_REPORTS_MAX_PACKAGE bytes are read (a bigger answer is cut there and fails the hash).
- * Any other package is left to core.
+ * Any other package for this plugin is refused; every other plugin's download is left to core.
  */
 function puzzles_sr_pre_download( $reply, $package, $upgrader = null, $hook_extra = array() ) {
-	if ( is_wp_error( $reply ) || ! is_string( $package ) || 0 !== strpos( $package, 'puzzles-sr://' )
-		|| ( isset( $hook_extra['plugin'] ) && plugin_basename( __FILE__ ) !== $hook_extra['plugin'] ) ) {
+	$ours = isset( $hook_extra['plugin'] ) && plugin_basename( __FILE__ ) === $hook_extra['plugin'];
+	if ( is_wp_error( $reply ) || ( isset( $hook_extra['plugin'] ) && ! $ours ) ) {
 		return $reply;
+	}
+	if ( ! is_string( $package ) || 0 !== strpos( $package, 'puzzles-sr://' ) ) {
+		return $ours ? new WP_Error( 'puzzles_sr_not_signed', 'This plugin installs only its own signed updates.' ) : $reply;
 	}
 	if ( ! preg_match( '~^puzzles-sr://(\d+\.\d+\.\d+)/([0-9a-f]{64})\z~', $package, $p ) ) {
 		return new WP_Error( 'puzzles_sr_bad_package', 'The update package does not match its signed manifest.' );
@@ -296,15 +309,83 @@ function puzzles_sr_pre_download( $reply, $package, $upgrader = null, $hook_extr
 }
 add_filter( 'upgrader_pre_download', 'puzzles_sr_pre_download', 10, 4 );
 
-// Sites install this plugin's updates themselves; every other plugin keeps whatever core decided.
+// Sites install this plugin's own signed updates themselves; any other offer for it, and every other plugin, keeps
+// whatever core decided.
 add_filter(
 	'auto_update_plugin',
 	function ( $update, $item ) {
-		return is_object( $item ) && plugin_basename( __FILE__ ) === ( $item->plugin ?? null ) ? true : $update;
+		return is_object( $item ) && plugin_basename( __FILE__ ) === ( $item->plugin ?? null )
+			&& is_string( $item->package ?? null ) && 0 === strpos( $item->package, 'puzzles-sr://' ) ? true : $update;
 	},
 	10,
 	2
 );
+
+// No email when an automatic update run only updated this plugin, successfully (routine, and every site would mail its
+// admin); a failure, or a batch with another plugin, is mailed as core decides.
+add_filter(
+	'auto_plugin_update_send_email',
+	function ( $enabled, $results ) {
+		foreach ( (array) $results as $r ) {
+			if ( plugin_basename( __FILE__ ) !== ( $r->item->plugin ?? null ) || true !== ( $r->result ?? null ) ) {
+				return $enabled;
+			}
+		}
+		return $results ? false : $enabled;
+	},
+	10,
+	2
+);
+
+// ---- Update-check freshness ----
+// Why: no transient shape tells an answered update check from a failed one, and any filter can rewrite stored offers
+// that a failed check then saves back. What: when api.wordpress.org answers core's own check (HTTP 200, the JSON key it
+// expects, the request made by wp_update_plugins/wp_update_themes/wp_version_check itself), the next save of that
+// transient, once, carries the time (`puzzles_sr_checked`) and its offers (`puzzles_sr_offers`): properties of core's
+// own transient, no option of ours. status.php reads them past the transient filters (contract: updatesCheckedAt).
+( function () {
+	$check = array( 'plugins' => 'wp_update_plugins', 'themes' => 'wp_update_themes', 'core' => 'wp_version_check' );
+	$at    = array(); // [ type => when core's check of it was answered, in this request ], until its next save
+	add_action(
+		'http_api_debug',
+		function ( $response, $context, $class, $args, $url ) use ( &$at, $check ) {
+			if ( 'response' !== $context || 200 !== (int) wp_remote_retrieve_response_code( $response )
+				|| ! preg_match( '~^https?://api\.wordpress\.org/(plugins|themes|core)/(?:update|version)-check/~', (string) $url, $m ) ) {
+				return;
+			}
+			$body = json_decode( wp_remote_retrieve_body( $response ), true );
+			if ( ! isset( $body[ 'core' === $m[1] ? 'offers' : $m[1] ] ) ) {
+				return;
+			}
+			// The request must be core's own: the caller of the innermost wp_remote_post/get is core's check function.
+			$trace = debug_backtrace( DEBUG_BACKTRACE_IGNORE_ARGS );
+			foreach ( $trace as $i => $frame ) {
+				if ( in_array( $frame['function'], array( 'wp_remote_post', 'wp_remote_get' ), true ) ) {
+					if ( ( $trace[ $i + 1 ]['function'] ?? '' ) === $check[ $m[1] ] ) {
+						$at[ $m[1] ] = time();
+					}
+					return;
+				}
+			}
+		},
+		10,
+		5
+	);
+	foreach ( array_keys( $check ) as $type ) {
+		add_filter(
+			"pre_set_site_transient_update_{$type}",
+			function ( $value ) use ( &$at, $type ) {
+				if ( isset( $at[ $type ] ) && is_object( $value ) ) {
+					$value->puzzles_sr_checked = $at[ $type ];
+					$value->puzzles_sr_offers  = puzzles_sr_offer_versions( $type, $value );
+				}
+				unset( $at[ $type ] ); // once: never a transient rebuilt after the answer's save
+				return $value;
+			},
+			PHP_INT_MAX
+		);
+	}
+} )();
 
 // ---- Admin page: Tools > Site Reports ----
 /** On a multisite only a network admin: a sub-site admin must not read network-wide data. */

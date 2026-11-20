@@ -1,8 +1,10 @@
 # Puzzles Site Reports
 
 A read-only WordPress plugin that exposes a site's status and SEO data to Puzzles' client reports
-through two `GET` routes under `/wp-json/puzzles-reports/v1/`. It stores only the hash of its
-access token and installs its own updates; nothing else is written. It runs nothing on front-end requests.
+through two `GET` routes under `/wp-json/puzzles-reports/v1/`. It stores only the hash of its access token, plus the
+time and offers of each answered update check on WordPress' own update data, and installs its own updates. Outside
+its routes it only adds cheap hooks (AGENTS.md, hard rule 3). After install, its update times read `null` until
+WordPress' next update check (normally within 12 hours).
 
 Requires WordPress 5.8+ and PHP 7.4+.
 
@@ -25,10 +27,12 @@ once, and creating a new connection stops the previous one at once. The routes a
 ## Updates
 
 The plugin updates itself from this repository's GitHub Releases through WordPress' own update check
-(the header's `Update URI`), and installs its own updates automatically. The check reads
+(the header's `Update URI`), and installs its own updates automatically, without an email when a run only updated
+this plugin and succeeded. Any other source's update package for it is refused at download, and never forced to
+auto-install (an admin can still install over it by hand). The check reads
 `https://github.com/puzzles-consulting/wp-site-reports/releases/latest/download/manifest.json`, which GitHub
 resolves to the newest release that is **not** a pre-release. It runs only inside WordPress' update check (cron or
-admin), never on a front-end request, and any failure leaves WordPress' own answer untouched.
+admin), never on a front-end request, and any failure means no offer for this plugin; other plugins are untouched.
 
 Updates are signed. The manifest is `{ version, sha256, requires, requires_php, tested, signature }`: `signature` is an
 Ed25519 signature by the release key of the five other fields joined by one newline each, in that order

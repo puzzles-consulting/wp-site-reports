@@ -1,5 +1,6 @@
 # Throwaway WordPress stack for tests/smoke.sh. Never left running: the script tears it down with `down -v`.
-# Images are pinned by digest (tag in the comment): a new WordPress, and so a new `tested`, is a deliberate bump.
+# Images are pinned by digest (tag in the comment): a new WordPress, and so a new `tested`, is a deliberate bump. The
+# version matrix (ci.yml, smoke-matrix) swaps the wp and cli images through WP_IMAGE and CLI_IMAGE, also digests.
 name: puzzles-site-reports-smoke # fixed, so `down -v` can never touch another project's stack
 services:
   db:
@@ -15,7 +16,7 @@ services:
       timeout: 3s
       retries: 30
   wp:
-    image: wordpress@sha256:15195799455c0440e34e4890478c0f1af26350ce166df93a402c1affb4fa0695 # wordpress:php8.3-apache
+    image: ${WP_IMAGE:-wordpress@sha256:15195799455c0440e34e4890478c0f1af26350ce166df93a402c1affb4fa0695} # wordpress:php8.3-apache
     depends_on:
       db:
         condition: service_healthy
@@ -26,10 +27,15 @@ services:
       WORDPRESS_DB_NAME: wp
       WORDPRESS_DB_USER: wp
       WORDPRESS_DB_PASSWORD: wp
+      # PHP's warnings, notices and deprecations, from the web and the CLI, land in tests/out/debug.log, which smoke.sh
+      # checks for this plugin's files. The image's wp-config.php defines WP_DEBUG from WORDPRESS_DEBUG.
+      WORDPRESS_DEBUG: "1"
+      WORDPRESS_CONFIG_EXTRA: "define( 'WP_DEBUG_LOG', '/out/debug.log' ); define( 'WP_DEBUG_DISPLAY', false );"
     volumes:
       - wpdata:/var/www/html
+      - ./out:/out
   cli:
-    image: wordpress@sha256:e4980e3ef763ce7535049c05a54e906d95b16370f28ca02fa329a079eebf3f65 # wordpress:cli-php8.3
+    image: ${CLI_IMAGE:-wordpress@sha256:e4980e3ef763ce7535049c05a54e906d95b16370f28ca02fa329a079eebf3f65} # wordpress:cli-php8.3
     user: "33:33" # www-data of the wp image, so both containers own the same files
     profiles: ["cli"]
     depends_on:

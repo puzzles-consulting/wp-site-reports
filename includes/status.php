@@ -13,17 +13,70 @@ function puzzles_sr_iso( $ts ): ?string {
 	return is_numeric( $ts ) && $ts > 0 ? gmdate( 'Y-m-d\TH:i:s\Z', (int) $ts ) : null;
 }
 
-/** When a check last ran, or null until it has succeeded once: a failed check stamps last_checked but stores no data
- * (core: no `updates`, also when the check is disabled; plugins and themes: no `checked`). The oldest of those given. */
-function puzzles_sr_checked_at( string $data, ...$transients ): ?string {
+/** A site transient as stored, past the site_transient_* filters (contract: updatesCheckedAt). */
+function puzzles_sr_raw_transient( string $name ) {
+	return wp_using_ext_object_cache() ? wp_cache_get( $name, 'site-transient' ) : get_site_option( '_site_transient_' . $name );
+}
+
+/** The oldest `puzzles_sr_checked` of the named transients as stored, or null (contract: updatesCheckedAt). */
+function puzzles_sr_checked_at( string ...$names ): ?string {
 	$times = array();
-	foreach ( $transients as $t ) {
-		if ( empty( $t->$data ) ) {
+	foreach ( $names as $n ) {
+		$t = puzzles_sr_raw_transient( $n );
+		if ( ! is_object( $t ) || empty( $t->puzzles_sr_checked ) ) {
 			return null;
 		}
-		$times[] = (int) ( $t->last_checked ?? 0 );
+		$times[] = (int) $t->puzzles_sr_checked;
 	}
 	return puzzles_sr_iso( min( $times ) );
+}
+
+/**
+ * The offered versions in an update transient: plugins and themes [ file or stylesheet => new_version ], core the
+ * list of versions it offers as upgrades, in its order. Strings only.
+ */
+function puzzles_sr_offer_versions( string $type, $t ): array {
+	$out = array();
+	if ( 'core' === $type ) {
+		foreach ( (array) ( $t->updates ?? array() ) as $o ) {
+			$v = is_object( $o ) && 'upgrade' === ( $o->response ?? null ) ? ( $o->current ?? $o->version ?? null ) : null;
+			if ( is_string( $v ) && '' !== $v ) {
+				$out[] = $v;
+			}
+		}
+		return $out;
+	}
+	foreach ( (array) ( $t->response ?? array() ) as $key => $o ) {
+		$o = (array) $o; // core stores plugins' as objects and themes' as arrays; a third-party updater may do either
+		if ( is_scalar( $o['new_version'] ?? null ) ) {
+			$out[ $key ] = (string) $o['new_version'];
+		}
+	}
+	return $out;
+}
+
+/** An offered version only when it is above the installed one (contract). */
+function puzzles_sr_newer( ?string $offer, string $installed ): ?string {
+	return null !== $offer && version_compare( $offer, $installed, '>' ) ? $offer : null;
+}
+
+/**
+ * Offers: the snapshot taken when core's check was last answered and the filtered read, the higher per item (a filter
+ * can add or raise an offer, never hide one); without a snapshot, the filtered read alone (contract).
+ */
+function puzzles_sr_offers( string $type ): array {
+	$raw  = puzzles_sr_raw_transient( 'update_' . $type );
+	$out  = ! empty( $raw->puzzles_sr_checked ) && is_array( $raw->puzzles_sr_offers ?? null ) ? $raw->puzzles_sr_offers : array();
+	$read = puzzles_sr_offer_versions( $type, get_site_transient( 'update_' . $type ) );
+	if ( 'core' === $type ) {
+		return array_merge( $out, $read );
+	}
+	foreach ( $read as $key => $v ) {
+		if ( ! isset( $out[ $key ] ) || version_compare( $v, (string) $out[ $key ], '>' ) ) {
+			$out[ $key ] = $v;
+		}
+	}
+	return $out;
 }
 
 /**
@@ -50,6 +103,12 @@ function puzzles_sr_short_msg( $v ): string {
 	$s = puzzles_sr_plain( is_scalar( $v ) ? preg_replace( '/\s*<[^>]*>\s*/', ' ', (string) $v ) : null );
 	return mb_substr( trim( puzzles_sr_scrub_paths( (string) $s ) ), 0, 300 );
 }
+
+// Wordfence builds these issues' shortMsg from a user_login (wfScanEngine): a fixed text leaves instead.
+const PUZZLES_SR_WF_GENERIC = array(
+	'easyPassword'         => 'A user has an easy password.',
+	'suspiciousAdminUsers' => 'An admin user was created outside WordPress or has a suspicious username.',
+);
 
 /** Wordfence's own open issues, ignored count and last scan; null when it is not installed, or active but unreadable. Never starts a scan. */
 function puzzles_sr_wordfence( array $plugins ): ?array {
@@ -86,7 +145,7 @@ function puzzles_sr_wordfence( array $plugins ): ?array {
 			$out['issues'][] = array(
 				'type'        => (string) $i['type'],
 				'severity'    => (int) $i['severity'], // Wordfence's own: 100 critical, 75 high, 50 medium, 25 low
-				'shortMsg'    => puzzles_sr_short_msg( $i['shortMsg'] ),
+				'shortMsg'    => PUZZLES_SR_WF_GENERIC[ (string) $i['type'] ] ?? puzzles_sr_short_msg( $i['shortMsg'] ),
 				'detectedAt'  => puzzles_sr_iso( $i['time'] ?? null ), // when Wordfence last re-stored the issue (contract)
 			);
 		}
@@ -98,18 +157,13 @@ function puzzles_sr_wordfence( array $plugins ): ?array {
 }
 
 function puzzles_sr_status(): array {
-	$core_t       = get_site_transient( 'update_core' );
-	$plugins_t    = get_site_transient( 'update_plugins' );
-	$themes_t     = get_site_transient( 'update_themes' );
-	$plugin_offer = $plugins_t->response ?? array();
-	$theme_offer  = $themes_t->response ?? array();
-
-	$core_update = null;
-	foreach ( is_array( $core_t->updates ?? null ) ? $core_t->updates : array() as $offer ) { // the first real upgrade offer, wherever it sits in the list
-		$version = is_object( $offer ) && 'upgrade' === ( $offer->response ?? null ) ? ( $offer->current ?? $offer->version ?? null ) : null;
-		if ( is_string( $version ) && '' !== $version ) {
-			$core_update = $version;
-			break;
+	$plugin_offer = puzzles_sr_offers( 'plugins' );
+	$theme_offer  = puzzles_sr_offers( 'themes' );
+	$wp_version   = get_bloginfo( 'version' );
+	$core_update  = null; // the highest upgrade offered above the running version, snapshot or read
+	foreach ( puzzles_sr_offers( 'core' ) as $v ) {
+		if ( version_compare( $v, $core_update ?? $wp_version, '>' ) ) {
+			$core_update = $v;
 		}
 	}
 
@@ -117,13 +171,12 @@ function puzzles_sr_status(): array {
 	$auto = (array) get_site_option( 'auto_update_plugins', array() );
 	$list = array();
 	foreach ( $all as $file => $p ) {
-		$offer  = $plugin_offer[ $file ]->new_version ?? null;
 		$list[] = array(
 			'file'       => (string) $file,
 			'name'       => (string) $p['Name'],
 			'version'    => (string) $p['Version'],
 			'active'     => is_plugin_active( $file ), // network-active counts
-			'update'     => null === $offer ? null : (string) $offer,
+			'update'     => puzzles_sr_newer( $plugin_offer[ $file ] ?? null, (string) $p['Version'] ),
 			'autoUpdate' => in_array( $file, $auto, true ),
 		);
 	}
@@ -141,31 +194,29 @@ function puzzles_sr_status(): array {
 	$active = get_stylesheet();
 	foreach ( wp_get_themes() as $stylesheet => $t ) {
 		$stylesheet = (string) $stylesheet; // a numeric folder name is an integer array key
-		$entry      = (array) ( $theme_offer[ $stylesheet ] ?? array() ); // core stores arrays, a third-party updater may store objects
-		$offer      = is_scalar( $entry['new_version'] ?? null ) ? (string) $entry['new_version'] : null;
-		$template   = $t->get_template();
+		$template   = (string) $t->get_template(); // older WordPress gives a numeric folder name as an integer here too
 		$themes[] = array(
-			'stylesheet' => (string) $stylesheet,
+			'stylesheet' => $stylesheet,
 			'name'       => (string) $t->get( 'Name' ),
 			'version'    => (string) $t->get( 'Version' ),
-			'active'     => (string) $stylesheet === $active,
-			'parent'     => $template !== $stylesheet ? (string) $template : null,
-			'update'     => $offer,
+			'active'     => $stylesheet === $active,
+			'parent'     => $template !== $stylesheet ? $template : null,
+			'update'     => puzzles_sr_newer( $theme_offer[ $stylesheet ] ?? null, (string) $t->get( 'Version' ) ),
 		);
 	}
 
 	return array(
 		'companion'        => array( 'version' => PUZZLES_SITE_REPORTS_VERSION ),
 		'wordpress'        => array(
-			'version'          => get_bloginfo( 'version' ),
+			'version'          => $wp_version,
 			'update'           => $core_update,
-			'updatesCheckedAt' => puzzles_sr_checked_at( 'updates', $core_t ),
+			'updatesCheckedAt' => puzzles_sr_checked_at( 'update_core' ),
 		),
 		'php'              => array( 'version' => PHP_VERSION ),
 		'plugins'          => $list,
 		'mustUse'          => $mu,
 		'themes'           => $themes,
-		'updatesCheckedAt' => puzzles_sr_checked_at( 'checked', $plugins_t, $themes_t ),
+		'updatesCheckedAt' => puzzles_sr_checked_at( 'update_plugins', 'update_themes' ),
 		'wordfence'        => puzzles_sr_wordfence( $all ),
 		'comments'         => array( 'defaultStatus' => (string) get_option( 'default_comment_status' ) ),
 	);
