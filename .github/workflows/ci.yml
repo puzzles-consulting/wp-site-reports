@@ -1,7 +1,8 @@
 name: CI
 on:
+  # Every PR runs: main's ruleset requires these checks, and a skipped workflow never reports them, so a docs-only PR
+  # would stay blocked. Pushes to main still skip docs-only changes.
   pull_request:
-    paths-ignore: ['docs/**', '.claude/**', 'AGENTS.md', 'README.md', 'CHANGELOG.md'] # none of them ships
   push:
     branches: [main]
     paths-ignore: ['docs/**', '.claude/**', 'AGENTS.md', 'README.md', 'CHANGELOG.md']
