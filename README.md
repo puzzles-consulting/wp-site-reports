@@ -8,10 +8,8 @@ Requires WordPress 5.8+ and PHP 7.4+.
 
 ## Install
 
-Client sites get only promoted releases. The portal's connect script installs the plugin and checks the release's
-signed manifest first. By hand: download `puzzles-site-reports.zip` from the latest release and check it with
-`bash ~/bin/wp-sr-promote verify vX.Y.Z puzzles-site-reports.zip <public key>` (gh signed in, the promoter installed:
-Release, below). The key is the one the sites trust: for a rotation release, the key of the release before it. Then:
+Client sites get only promoted releases, installed by the portal's connect script, which checks the signed manifest.
+By hand, check the latest release's zip first with `wp-sr-promote verify` (Release, below), then:
 
 ```bash
 wp plugin install puzzles-site-reports.zip --activate
@@ -67,8 +65,8 @@ hours).
 
 The promoter. [`scripts/wp-sr-promote`](scripts/wp-sr-promote) is the whole promoter and key generator; no other code
 from this repository runs on the machine you promote from. Its header says what it checks and needs. Review it by
-hand and install it outside the repository, from a commit you reviewed; re-install it only after reviewing its diff
-(a change to build.sh's zip format needs one too: the promoter refuses any zip that is not build.sh's):
+hand and install it outside the repository, from a commit you reviewed; re-install it only after reviewing its diff,
+also after a change to build.sh's zip format:
 
 ```bash
 git -C <clone> show <sha>:scripts/wp-sr-promote | cat -v      # review it, all of it
@@ -77,8 +75,9 @@ mkdir -p ~/bin && git -C <clone> show <sha>:scripts/wp-sr-promote >~/bin/wp-sr-p
 
 The baseline of each review is the newest release you promoted (its `owner.sig`, your key over its manifest,
 verifies), which must also be GitHub's latest; the promoter notes each promotion in
-`~/.config/wp-sr-promote/last` and refuses a baseline below it. Without that note (a new machine) it says the
-baseline comes from GitHub only. A promotion uploads `manifest.json` (signed with the key the sites trust) and
+`~/.config/wp-sr-promote/last` and refuses a baseline below it, unless this machine pulled that release. Without
+that note (a new machine) it says the baseline comes from GitHub only. `verify vX.Y.Z <zip> <public key>` checks a zip
+against its signed manifest (gh signed in; for a rotation release, the key of the release before it). A promotion uploads `manifest.json` (signed with the key the sites trust) and
 `owner.sig`, and marks the release latest; a rerun finishes an interrupted one.
 
 The signing key lives in the secret store (Bitwarden) plus one offline copy. Losing it means reinstalling the plugin
@@ -86,8 +85,8 @@ on every site over SSH, since sites accept updates only from it. It is created b
 `bash ~/bin/wp-sr-promote keygen 3>&1 1>&2 | <store-secret-from-stdin>`. The public key goes into
 `PUZZLES_SR_UPDATE_PUBKEY`; the secret key goes from file descriptor 3 straight into the store.
 
-- Bad release: `gh release edit vX.Y.Z --prerelease` and delete its `manifest.json` asset: GitHub's latest falls back
-  to the previous release, and no site is offered the bad one. Sites already on it are fixed only by rolling forward
+- Bad release: `bash ~/bin/wp-sr-promote pull vX.Y.Z` marks it pre-release, deletes its `manifest.json` and notes the
+  pull on this machine: GitHub's latest falls back to the previous release, and no site is offered the bad one. Sites already on it are fixed only by rolling forward
   to `X.Y.Z+1`, promptly: anyone who can edit releases can mark it latest again while its old signed manifest exists
   somewhere (manifests do not expire; that is a known, parked limit).
 - Rotating the key: sites trust only the key in the version they run, so the new key ships in a release signed with
@@ -95,11 +94,11 @@ on every site over SSH, since sites accept updates only from it. It is created b
   old key in `PUZZLES_SR_SIGNING_KEY` and the new one in `PUZZLES_SR_NEW_SIGNING_KEY`; from then on promote with the
   new key. Promote the next release only once the portal shows every site on the rotation release.
 - A pulled rotation release strands one group of sites whatever you do next: those that took it trust only the new
-  key, the others only the old one, and one manifest serves one group. Pulled by mistake: promote it again
-  (`--rotate`, both keys; its baseline is the release before it). Really bad: choose the group by the portal's version
-  column. For the sites on the old release, promote the fix with the old key as usual. For the sites on the rotation
-  release, promote it with the new key and `--baseline-key <old public key>`; that needs the rotation release's
-  `manifest.json` and `owner.sig` still on it, as proof.
+  key, the others only the old one, and one manifest serves one group. `pull` keeps a rotation release's
+  `manifest.json` for that reason (`--delete-manifest` to drop it). Pulled by mistake: promote it again (`--rotate`,
+  both keys). Really bad: choose the group by the portal's version column. For the sites on the old release, promote
+  the fix with the old key as usual. For the sites on the rotation release, promote it with the new key and
+  `--baseline-key <old public key>`, which needs the rotation release still signed, as proof.
 
 Branch protection on `main` and restricting who can create `v*` tags on GitHub are still recommended.
 
