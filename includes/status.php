@@ -31,11 +31,39 @@ function puzzles_sr_checked_at( string ...$names ): ?string {
 	return puzzles_sr_iso( min( $times ) );
 }
 
-/** A transient's offers as stored, plus any its filters add (a filter can add an offer, never hide one: contract). */
-function puzzles_sr_offers( string $name, string $field ): array {
-	$raw      = (array) ( puzzles_sr_raw_transient( $name )->$field ?? array() );
-	$filtered = (array) ( get_site_transient( $name )->$field ?? array() );
-	return 'updates' === $field ? array_merge( $raw, $filtered ) : $raw + $filtered; // core's is a list, the others keyed by file
+/**
+ * The offered versions in an update transient: plugins and themes [ file or stylesheet => new_version ], core the
+ * list of versions it offers as upgrades, in its order. Strings only.
+ */
+function puzzles_sr_offer_versions( string $type, $t ): array {
+	$out = array();
+	if ( 'core' === $type ) {
+		foreach ( (array) ( $t->updates ?? array() ) as $o ) {
+			$v = is_object( $o ) && 'upgrade' === ( $o->response ?? null ) ? ( $o->current ?? $o->version ?? null ) : null;
+			if ( is_string( $v ) && '' !== $v ) {
+				$out[] = $v;
+			}
+		}
+		return $out;
+	}
+	foreach ( (array) ( $t->response ?? array() ) as $key => $o ) {
+		$o = (array) $o; // core stores plugins' as objects and themes' as arrays; a third-party updater may do either
+		if ( is_scalar( $o['new_version'] ?? null ) ) {
+			$out[ (string) $key ] = (string) $o['new_version'];
+		}
+	}
+	return $out;
+}
+
+/**
+ * Offers: the snapshot taken when core's check was last answered, plus any a filter adds on read (a filter can add an
+ * offer, never hide one); without a snapshot, the filtered read alone (contract).
+ */
+function puzzles_sr_offers( string $type ): array {
+	$raw  = puzzles_sr_raw_transient( 'update_' . $type );
+	$snap = is_object( $raw ) && ! empty( $raw->puzzles_sr_checked ) && is_array( $raw->puzzles_sr_offers ?? null ) ? $raw->puzzles_sr_offers : array();
+	$read = puzzles_sr_offer_versions( $type, get_site_transient( 'update_' . $type ) );
+	return 'core' === $type ? array_merge( $snap, $read ) : $snap + $read;
 }
 
 /**
@@ -116,29 +144,20 @@ function puzzles_sr_wordfence( array $plugins ): ?array {
 }
 
 function puzzles_sr_status(): array {
-	$plugin_offer = puzzles_sr_offers( 'update_plugins', 'response' );
-	$theme_offer  = puzzles_sr_offers( 'update_themes', 'response' );
-
-	$core_update = null;
-	foreach ( puzzles_sr_offers( 'update_core', 'updates' ) as $offer ) { // the first real upgrade offer, wherever it sits in the list
-		$version = is_object( $offer ) && 'upgrade' === ( $offer->response ?? null ) ? ( $offer->current ?? $offer->version ?? null ) : null;
-		if ( is_string( $version ) && '' !== $version ) {
-			$core_update = $version;
-			break;
-		}
-	}
+	$plugin_offer = puzzles_sr_offers( 'plugins' );
+	$theme_offer  = puzzles_sr_offers( 'themes' );
+	$core_update  = puzzles_sr_offers( 'core' )[0] ?? null; // the first upgrade offered, wherever it sat in core's list
 
 	$all  = get_plugins();
 	$auto = (array) get_site_option( 'auto_update_plugins', array() );
 	$list = array();
 	foreach ( $all as $file => $p ) {
-		$offer  = $plugin_offer[ $file ]->new_version ?? null;
 		$list[] = array(
 			'file'       => (string) $file,
 			'name'       => (string) $p['Name'],
 			'version'    => (string) $p['Version'],
 			'active'     => is_plugin_active( $file ), // network-active counts
-			'update'     => null === $offer ? null : (string) $offer,
+			'update'     => $plugin_offer[ $file ] ?? null,
 			'autoUpdate' => in_array( $file, $auto, true ),
 		);
 	}
@@ -156,8 +175,6 @@ function puzzles_sr_status(): array {
 	$active = get_stylesheet();
 	foreach ( wp_get_themes() as $stylesheet => $t ) {
 		$stylesheet = (string) $stylesheet; // a numeric folder name is an integer array key
-		$entry      = (array) ( $theme_offer[ $stylesheet ] ?? array() ); // core stores arrays, a third-party updater may store objects
-		$offer      = is_scalar( $entry['new_version'] ?? null ) ? (string) $entry['new_version'] : null;
 		$template   = (string) $t->get_template(); // older WordPress gives a numeric folder name as an integer here too
 		$themes[] = array(
 			'stylesheet' => (string) $stylesheet,
@@ -165,7 +182,7 @@ function puzzles_sr_status(): array {
 			'version'    => (string) $t->get( 'Version' ),
 			'active'     => (string) $stylesheet === $active,
 			'parent'     => $template !== $stylesheet ? $template : null,
-			'update'     => $offer,
+			'update'     => $theme_offer[ $stylesheet ] ?? null,
 		);
 	}
 

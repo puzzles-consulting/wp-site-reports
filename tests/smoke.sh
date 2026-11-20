@@ -82,6 +82,18 @@ function puzzles_sr_test_download( $package, $plugin = null ) {
 	return ( is_wp_error( $r ) ? $r->get_error_code() : var_export( $r, true ) ) . " $left";
 }'
 put_mu psr-update.php "$mu"
+# answer() makes api.wordpress.org answer core's update checks: from inside the check's own request, as WP_Http would,
+# it fires http_api_debug with the answer and returns it (core then saves it). Inert while the option is unset.
+put_mu psr-answer.php '<?php
+add_filter( "pre_http_request", function ( $pre, $args, $url ) {
+	$a = get_option( "psr_answer" );
+	if ( ! is_array( $a ) || ! preg_match( "~^https?://api[.]wordpress[.]org/(plugins|themes|core)/(update|version)-check/~", $url ) ) {
+		return $pre;
+	}
+	$r = array( "headers" => array(), "body" => $a["body"], "response" => array( "code" => (int) $a["code"], "message" => "" ), "cookies" => array(), "filename" => null );
+	do_action( "http_api_debug", $r, "response", "Requests", $args, $url );
+	return $r;
+}, 10, 3 );'
 
 # Apache may lag behind `core install` (which went through WP-CLI): wait until WordPress answers over HTTP.
 for _ in $(seq 1 40); do
@@ -107,17 +119,22 @@ call() { # call <route> [token] -> HTTP status; the body lands in out/<route>.js
   curl -s -o "out/$1.json" -w '%{http_code}' "${h[@]}" "http://localhost:8080/?rest_route=/puzzles-reports/v1/$1&_=$(ck)"
 }
 st() { [ "$(call status "$t")" = 200 ] && jq -e "$1" out/status.json; } # st <jq filter>: /status with token $t holds it
+answer() { # answer <code> <body> <php>: <php> runs while api.wordpress.org answers core's update checks with <code> <body>
+  wpcli eval "update_option( 'psr_answer', array( 'code' => $1, 'body' => base64_decode( '$(printf %s "$2" | base64 | tr -d '\n')' ) ) ); $3 delete_option( 'psr_answer' );" | tr -d '\r\n'
+}
+P_ANSWER='{"plugins":{"hello.php":{"slug":"hello-dolly","plugin":"hello.php","new_version":"9.9","package":"x"}},"translations":[],"no_update":[]}'
+stamped() { echo "echo (int) ! empty( get_site_option( '_site_transient_$1' )->puzzles_sr_checked );"; } # stamped <transient>: PHP that prints 1 when it is stamped
 delete_update_transients() { # forces the never-checked state
   for t in update_core update_plugins update_themes; do wpcli transient delete "$t" --network >/dev/null 2>&1 || true; done
 }
 fake_checks() { # fake_checks <core 0|1> <plugins 0|1> <themes 0|1>: each transient as core leaves it after an answered
-  # check (1: stamped at 1000 for core, 2000 for plugins, 3000 for themes) or after failed ones only (0: no stamp, and
-  # no core offers). hello.php is offered 9.9 either way.
+  # check (1: stamped at 1000 for core, 2000 for plugins, 3000 for themes, with its offers' snapshot) or after failed
+  # ones only (0: no stamp, no snapshot, no core offers). hello.php is offered 9.9 either way.
   wpcli eval "
-    \$t = function ( \$ok, \$at, \$data ) { return (object) ( array( 'last_checked' => \$at ) + \$data + ( \$ok ? array( 'puzzles_sr_checked' => \$at ) : array() ) ); };
-    set_site_transient( 'update_core', \$t( $1, 1000, array( 'version_checked' => get_bloginfo( 'version' ), 'updates' => $1 ? array( (object) array( 'response' => 'latest', 'current' => get_bloginfo( 'version' ) ) ) : array() ) ) );
-    set_site_transient( 'update_plugins', \$t( $2, 2000, array( 'response' => array( 'hello.php' => (object) array( 'new_version' => '9.9' ) ) ) ) );
-    set_site_transient( 'update_themes', \$t( $3, 3000, array( 'response' => array() ) ) );"
+    \$t = function ( \$ok, \$at, \$data, \$snap ) { return (object) ( array( 'last_checked' => \$at ) + \$data + ( \$ok ? array( 'puzzles_sr_checked' => \$at, 'puzzles_sr_offers' => \$snap ) : array() ) ); };
+    set_site_transient( 'update_core', \$t( $1, 1000, array( 'version_checked' => get_bloginfo( 'version' ), 'updates' => $1 ? array( (object) array( 'response' => 'latest', 'current' => get_bloginfo( 'version' ) ) ) : array() ), array() ) );
+    set_site_transient( 'update_plugins', \$t( $2, 2000, array( 'response' => array( 'hello.php' => (object) array( 'new_version' => '9.9' ) ) ), array( 'hello.php' => '9.9' ) ) );
+    set_site_transient( 'update_themes', \$t( $3, 3000, array( 'response' => array() ), array() ) );"
 }
 
 # ---- cases (plain functions; run in the fixed order of CASES at the bottom) ----
@@ -241,41 +258,48 @@ case_status_checked_per_transient() { # core's check, and the plugin and theme c
   delete_update_transients
 }
 
-case_status_check_stamp() { # the stamp: an answer from api.wordpress.org, on the next save only; read past the filters
+case_status_check_stamp() { # the stamp: core's own check answered by api.wordpress.org, on the next save only
   t=$(fresh_token)
-  # one process each: http_api_debug as core fires it for a check's answer, then core saving that check's transient
-  stamp() { # stamp <code> <body> <url> [transient]: 1 when the saved transient carries the stamp
-    local n=${4:-update_plugins}
-    wpcli eval "do_action( 'http_api_debug', array( 'response' => array( 'code' => $1 ), 'body' => '$2' ), 'response', 'Requests', array(), '$3' ); set_site_transient( '$n', (object) array( 'last_checked' => time() ) ); echo (int) ! empty( get_site_option( '_site_transient_$n' )->puzzles_sr_checked );" | tr -d '\r\n'
-  }
-  o=$(stamp 200 '{"plugins":[]}' https://api.wordpress.org/plugins/update-check/1.1/); [ "$o" = 1 ]
-  o=$(stamp 200 '{"themes":[]}' https://api.wordpress.org/themes/update-check/1.1/ update_themes); [ "$o" = 1 ]
-  o=$(stamp 200 '{"offers":[]}' https://api.wordpress.org/core/version-check/1.7/ update_core); [ "$o" = 1 ]
-  o=$(stamp 200 'not json' https://api.wordpress.org/plugins/update-check/1.1/); [ "$o" = 0 ]
-  o=$(stamp 200 '{"themes":[]}' https://api.wordpress.org/plugins/update-check/1.1/); [ "$o" = 0 ] # not the key it expects
-  o=$(stamp 500 '{"plugins":[]}' https://api.wordpress.org/plugins/update-check/1.1/); [ "$o" = 0 ]
-  o=$(stamp 200 '{"plugins":[]}' https://example.com/plugins/update-check/1.1/); [ "$o" = 0 ]
+  o=$(answer 200 "$P_ANSWER" "delete_site_transient( 'update_plugins' ); wp_update_plugins(); $(stamped update_plugins)"); [ "$o" = 1 ]
+  o=$(answer 200 '{"themes":[],"translations":[],"no_update":[]}' "delete_site_transient( 'update_themes' ); wp_update_themes(); $(stamped update_themes)"); [ "$o" = 1 ]
+  o=$(answer 200 '{"offers":[],"translations":[]}' "delete_site_transient( 'update_core' ); wp_version_check(); $(stamped update_core)"); [ "$o" = 1 ]
+  o=$(answer 200 'not json' "delete_site_transient( 'update_plugins' ); wp_update_plugins(); $(stamped update_plugins)"); [ "$o" = 0 ]
+  o=$(answer 200 '{"translations":[]}' "delete_site_transient( 'update_core' ); wp_version_check(); $(stamped update_core)"); [ "$o" = 0 ] # not the key it expects (offers)
+  o=$(answer 500 "$P_ANSWER" "delete_site_transient( 'update_plugins' ); wp_update_plugins(); $(stamped update_plugins)"); [ "$o" = 0 ]
+  # the same answer to a request core's check did not make (another plugin asking the API itself): no stamp
+  o=$(answer 200 "$P_ANSWER" "delete_site_transient( 'update_plugins' ); wp_remote_post( 'https://api.wordpress.org/plugins/update-check/1.1/' ); set_site_transient( 'update_plugins', (object) array( 'last_checked' => time() ) ); $(stamped update_plugins)"); [ "$o" = 0 ]
   # once: an answer stamps the next save only, never a transient rebuilt later in the same request (as after
   # `wp plugin update`, whose re-check then fails)
-  offline
-  o=$(wpcli eval 'do_action( "http_api_debug", array( "response" => array( "code" => 200 ), "body" => "{\"plugins\":[]}" ), "response", "Requests", array(), "https://api.wordpress.org/plugins/update-check/1.1/" ); set_site_transient( "update_plugins", (object) array( "last_checked" => time() ) ); $a = ! empty( get_site_option( "_site_transient_update_plugins" )->puzzles_sr_checked ); delete_site_transient( "update_plugins" ); wp_update_plugins(); echo (int) $a, (int) ! empty( get_site_option( "_site_transient_update_plugins" )->puzzles_sr_checked );' | tr -d '\r\n')
+  o=$(answer 200 "$P_ANSWER" "delete_site_transient( 'update_plugins' ); wp_update_plugins(); $(stamped update_plugins) delete_site_transient( 'update_plugins' ); update_option( 'psr_answer', array( 'code' => 500, 'body' => '' ) ); wp_update_plugins(); $(stamped update_plugins)")
   [ "$o" = 10 ]
   st '.updatesCheckedAt == null'
-  rm_mu psr-offline.php
   # an external object cache: read from its site-transient group
   o=$(wpcli eval 'wp_using_ext_object_cache( true ); wp_cache_set( "update_plugins", (object) array( "puzzles_sr_checked" => 1234 ), "site-transient" ); wp_cache_set( "update_themes", (object) array( "puzzles_sr_checked" => 5678 ), "site-transient" ); echo puzzles_sr_checked_at( "update_plugins", "update_themes" ); wp_using_ext_object_cache( false );' | tr -d '\r\n')
   [ "$o" = 1970-01-01T00:20:34Z ]
-  # an update disabler answering core's transient on read: the stored stamp is not refreshed, and the stored offer stays
-  wpcli eval 'set_site_transient( "update_core", (object) array( "last_checked" => 1000, "puzzles_sr_checked" => 1000, "updates" => array( (object) array( "response" => "upgrade", "current" => "99.0" ) ) ) );'
+  delete_update_transients
+}
+
+case_status_offers() { # offers: the answered check's snapshot, plus what a filter adds on read; never hidden
+  t=$(fresh_token)
+  # an answered plugin check snapshots hello.php's offer; then a "freeze" filter hides it on read (and adds one for
+  # akismet), and a failed check saves that filtered object back: the snapshot still shows the offer
+  fake_checks 1 1 1
+  o=$(answer 200 "$P_ANSWER" "delete_site_transient( 'update_plugins' ); wp_update_plugins(); echo wp_json_encode( get_site_option( '_site_transient_update_plugins' )->puzzles_sr_offers );"); [ "$o" = '{"hello.php":"9.9"}' ]
+  put_mu psr-freeze.php '<?php add_filter( "site_transient_update_plugins", function ( $v ) { if ( is_object( $v ) ) { unset( $v->response["hello.php"] ); $v->response["akismet/akismet.php"] = (object) array( "new_version" => "77.0" ); } return $v; } );'
+  offline
+  wpcli eval 'wp_update_plugins( array( "psr" => 1 ) );' # extra stats: it checks although the last answer is recent
+  [ "$(wpcli eval 'echo (int) isset( get_site_option( "_site_transient_update_plugins" )->response["hello.php"] );' | tr -d '\r\n')" = 0 ] # stored without it now
+  st '([.plugins[] | select(.file == "hello.php") | .update] == ["9.9"]) and ([.plugins[] | select(.file == "akismet/akismet.php") | .update] == ["77.0"]) and .updatesCheckedAt != null'
+  rm_mu psr-offline.php; rm_mu psr-freeze.php
+  # no snapshot (plugins never answered): the offers are the filtered read, and the time is unknown
+  fake_checks 1 0 1
+  st '([.plugins[] | select(.file == "hello.php") | .update] == ["9.9"]) and .updatesCheckedAt == null'
+  # an update disabler answering core's transient on read: the stored stamp is not refreshed, the snapshot still offers
+  wpcli eval 'set_site_transient( "update_core", (object) array( "last_checked" => 1000, "version_checked" => get_bloginfo( "version" ), "updates" => array(), "puzzles_sr_checked" => 1000, "puzzles_sr_offers" => array( "99.0" ) ) );'
   put_mu psr-disabler.php '<?php add_filter( "pre_site_transient_update_core", function () { return (object) array( "last_checked" => time(), "version_checked" => get_bloginfo( "version" ), "updates" => array() ); } );'
   wpcli eval 'wp_version_check();'
   st '.wordpress.updatesCheckedAt == "1970-01-01T00:16:40Z" and .wordpress.update == "99.0"'
-  rm_mu psr-disabler.php
-  # a read filter can add an offer (Plugin Update Checker does), never hide a stored one ("freeze this plugin")
-  fake_checks 1 1 1
-  put_mu psr-freeze.php '<?php add_filter( "site_transient_update_plugins", function ( $v ) { if ( is_object( $v ) ) { unset( $v->response["hello.php"] ); $v->response["akismet/akismet.php"] = (object) array( "new_version" => "77.0" ); } return $v; } );'
-  st '([.plugins[] | select(.file == "hello.php") | .update] == ["9.9"]) and ([.plugins[] | select(.file == "akismet/akismet.php") | .update] == ["77.0"])'
-  rm_mu psr-freeze.php; delete_update_transients
+  rm_mu psr-disabler.php; delete_update_transients
 }
 
 case_status_updater_response() { # what updaters add to a failed check (`response`, `translations`) is no answer
@@ -287,6 +311,7 @@ add_filter( "site_transient_update_plugins", $psr );        // on read, as Plugi
 add_filter( "pre_set_site_transient_update_plugins", $psr ); // on save, as EDD (`response`) and WooCommerce (`translations`)'
   offline
   wpcli eval 'wp_update_plugins();' # fails: only last_checked, plus what the updaters add
+  [ "$(wpcli eval '$t = get_site_option( "_site_transient_update_plugins" ); echo (int) ( isset( $t->response ) && property_exists( $t, "translations" ) );' | tr -d '\r\n')" = 1 ] # their junk is stored
   st '.updatesCheckedAt == null'
   rm_mu psr-offline.php; rm_mu psr-updater.php; delete_update_transients
 }

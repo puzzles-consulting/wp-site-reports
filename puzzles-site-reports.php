@@ -338,22 +338,25 @@ add_filter(
 );
 
 // ---- Update-check freshness ----
-// No transient shape tells an answered update check from a failed one (updaters and disablers write `response`,
-// `translations` or a whole fake transient), so success is recorded where it happens: when api.wordpress.org answers a
-// check with HTTP 200 and the JSON key it expects, the next save of that check's transient carries the time as
-// `puzzles_sr_checked` (a property of core's own transient: no option of ours), once. A later failure saves the same
-// object, old time included; a rebuilt transient, or a check that never reaches the API, gets none. status.php reads it
-// past the transient filters (contract: updatesCheckedAt). On any request this costs a URL test per outgoing HTTP
-// response and an array lookup per update-transient save.
+// No transient shape tells an answered update check from a failed one, and stored offers can be rewritten by any filter
+// on their way back to storage (a failed check saves what it read). So the plugin records what core's own check got,
+// where it gets it: when api.wordpress.org answers wp_update_plugins(), wp_update_themes() or wp_version_check() with
+// HTTP 200 and the JSON key it expects, the next save of that transient carries the time (`puzzles_sr_checked`) and a
+// snapshot of its offers (`puzzles_sr_offers`), once: properties of core's own transient, no option of ours. Other saves
+// leave both as they are on the object saved (a failed check passes back the object it read, both included). status.php
+// reads them past the transient filters (contract: updatesCheckedAt). The cost on any request: a URL test per outgoing
+// HTTP response and an array lookup per update-transient save.
 ( function () {
-	$at = array(); // [ type => when api.wordpress.org answered it, in this request ], until the next save of that type
+	$at = array(); // [ type => when api.wordpress.org answered core's check of it, in this request ], until its next save
 	add_action(
 		'http_api_debug',
 		function ( $response, $context, $class, $args, $url ) use ( &$at ) {
 			if ( 'response' === $context && 200 === (int) wp_remote_retrieve_response_code( $response )
 				&& preg_match( '~^https?://api\.wordpress\.org/(plugins|themes|core)/(?:update|version)-check/~', (string) $url, $m ) ) {
 				$body = json_decode( wp_remote_retrieve_body( $response ), true );
-				if ( isset( $body[ 'core' === $m[1] ? 'offers' : $m[1] ] ) ) {
+				$core = array( 'plugins' => 'wp_update_plugins', 'themes' => 'wp_update_themes', 'core' => 'wp_version_check' );
+				if ( isset( $body[ 'core' === $m[1] ? 'offers' : $m[1] ] ) // the answer, and core's own check asked for it
+					&& in_array( $core[ $m[1] ], array_column( debug_backtrace( DEBUG_BACKTRACE_IGNORE_ARGS ), 'function' ), true ) ) {
 					$at[ $m[1] ] = time();
 				}
 			}
@@ -367,6 +370,7 @@ add_filter(
 			function ( $value ) use ( &$at, $type ) {
 				if ( isset( $at[ $type ] ) && is_object( $value ) ) {
 					$value->puzzles_sr_checked = $at[ $type ];
+					$value->puzzles_sr_offers  = puzzles_sr_offer_versions( $type, $value );
 				}
 				unset( $at[ $type ] ); // one save per answer: never a transient rebuilt after it
 				return $value;
