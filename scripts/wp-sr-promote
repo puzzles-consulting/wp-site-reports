@@ -26,8 +26,9 @@
 #      GitHub's latest, not one this machine pulled, and not below the highest release this machine promoted and did
 #      not pull (${XDG_CONFIG_HOME:-~/.config}/wp-sr-promote/promoted). No such release: only with --first.
 #   2. Candidate: the tag's pre-release zip, at most 5 MB and stored, must be byte for byte build.sh's zip of its files
-#      (so every unzip sees the same files), and its files must pass the checks below, each named by its refusal: names,
-#      ASCII, `<?` only in PHP, the version, key, Update URI and URL lines, and the allowlist before the key define.
+#      (so every unzip sees the same files), its version must be newer than every release this machine pulled but
+#      itself, and its files must pass the checks below, each named by its refusal: names, ASCII, `<?` only in PHP,
+#      the version, key, Update URI and URL lines, and the allowlist before the key define.
 #   3. Review: the full diff of the two zips' files through `cat -v`, then the list of changed files; you type the
 #      version on a terminal.
 #   4. Sign `<version>\n<sha256>\n<requires>\n<requires_php>\n<tested>` with the key sites trust (manifest.json) and
@@ -71,14 +72,16 @@ PULLED="${NOTE%/*}/pulled"                                        # one version 
 KEY_RE='^[A-Za-z0-9+/]{43}=$'
 SIG_RE='^[A-Za-z0-9+/]{86}==$'
 VER_RE='^[0-9]+\.[0-9]+(\.[0-9]+)?$'
-TAG_RE='^v([0-9]+\.[0-9]+\.[0-9]+)$'
+TAG_RE='^v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$' # no leading zeros: sort -V and PHP would disagree
+MAN_MAX=1024 # the most of a manifest.json read
+SIG_MAX=200  # the most of an owner.sig read
 MAN_RE='^[{]"version":"([0-9.]+)","sha256":"([0-9a-f]{64})","requires":"([0-9.]+)","requires_php":"([0-9.]+)","tested":"([0-9.]+)","signature":"([A-Za-z0-9+/]{86}==)"[}]$'
 PATH_RE='^puzzles-site-reports/[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*$' # every name a zip may hold
 HP='^([[:blank:]]*<\?(php)?)?[[:blank:]/*#@]*' # the prefix of a header line as get_file_data() reads it (any case)
 sha_of() { sha256sum "$1" | cut -c1-64; }
 manifest() { # manifest <file> <version>: sets F (version, sha256, requires, requires_php, tested, signature) and MSG
   local m
-  m=$(head -c 1024 "$1" 2>/dev/null | tr -d '\r\n' || true)
+  m=$(head -c $MAN_MAX "$1" 2>/dev/null | tr -d '\r\n' || true)
   [[ "$m" =~ $MAN_RE ]] && [ "${BASH_REMATCH[1]}" = "$2" ] || return 1
   F=("${BASH_REMATCH[@]:1}")
   MSG="${F[0]}"$'\n'"${F[1]}"$'\n'"${F[2]}"$'\n'"${F[3]}"$'\n'"${F[4]}"
@@ -89,9 +92,9 @@ key_in() { sed -n "s/^define( 'PUZZLES_SR_UPDATE_PUBKEY', '\([^']*\)' );\$/\1/p"
 promoted() { # promoted <tag> <public key>: its manifest, an owner.sig by that key over it, and the zip it names ($W/r/<tag>)
   local d="$W/r/$1" s
   mkdir -p "$d"
-  [ -f "$d/manifest.json" ] || fetch_asset "$1" manifest.json "$d/manifest.json" 1024 || return 1
+  [ -f "$d/manifest.json" ] || fetch_asset "$1" manifest.json "$d/manifest.json" $MAN_MAX || return 1
   manifest "$d/manifest.json" "${1#v}" || return 1
-  [ -f "$d/owner.sig" ] || fetch_asset "$1" owner.sig "$d/owner.sig" 200 || return 1
+  [ -f "$d/owner.sig" ] || fetch_asset "$1" owner.sig "$d/owner.sig" $SIG_MAX || return 1
   s=$(tr -d '\r\n' <"$d/owner.sig")
   [[ "$s" =~ $SIG_RE ]] && verified "$2" "$s" "$MSG" || return 1
   [ -f "$d/puzzles-site-reports.zip" ] || fetch_asset "$1" puzzles-site-reports.zip "$d/puzzles-site-reports.zip" $MAX || return 1
@@ -176,7 +179,7 @@ fi
 if [ "${1:-}" = verify ]; then
   [ $# -eq 4 ] && [[ "$4" =~ $KEY_RE && "$2" =~ $TAG_RE ]] || die "$USAGE"
   VV=${BASH_REMATCH[1]}
-  fetch_asset "$2" manifest.json "$W/r/manifest.json" 1024 && manifest "$W/r/manifest.json" "$VV" || die "$2 has no manifest.json this script wrote: it was never promoted, or it was pulled"
+  fetch_asset "$2" manifest.json "$W/r/manifest.json" $MAN_MAX && manifest "$W/r/manifest.json" "$VV" || die "$2 has no manifest.json this script wrote: it was never promoted, or it was pulled"
   [ "$(sha_of "$3")" = "${F[1]}" ] || die "$3 is not the zip $2's manifest names (sha256 ${F[1]})"
   verified "$4" "${F[5]}" "$MSG" || die "$2's manifest is not signed by $4 (for a rotation release, pass the key of the release before it)"
   echo "ok: $3 is $2, as signed by $4"
@@ -196,13 +199,11 @@ if [ "${1:-}" = pull ]; then
     # manifest names, and the manifest itself does not verify with that key (the previous key signed it).
     [ "$(echo keypair | crypto 2>/dev/null | wc -w)" = 2 ] \
       || die "$2 is pre-release now, but telling whether it is a rotation release needs php or Docker: run this where one works, or with --delete-manifest"
-    mkdir "$W/r/z"
-    if fetch_asset "$2" manifest.json "$W/r/manifest.json" 1024 && manifest "$W/r/manifest.json" "$PV" \
-      && fetch_asset "$2" owner.sig "$W/r/owner.sig" 200 && fetch_asset "$2" puzzles-site-reports.zip "$W/r/z.zip" $MAX \
-      && (cd "$W" && zipx "$2" r/z.zip r/z 2>/dev/null); then
-      K=$(key_in "$W/r/z/puzzles-site-reports/puzzles-site-reports.php" 2>/dev/null || true); S=$(tr -d '\r\n' <"$W/r/owner.sig")
-      [[ "$K" =~ $KEY_RE && "$S" =~ $SIG_RE ]] && verified "$K" "$S" "$MSG" && [ "$(sha_of "$W/r/z.zip")" = "${F[1]}" ] \
-        && ! verified "$K" "${F[5]}" "$MSG" && ROT=1
+    mkdir -p "$W/r/$2"
+    if fetch_asset "$2" puzzles-site-reports.zip "$W/r/$2/puzzles-site-reports.zip" $MAX \
+      && (cd "$W" && zipx "$2" "r/$2/puzzles-site-reports.zip" "r/$2/x" 2>/dev/null); then
+      K=$(key_in "$W/r/$2/x/puzzles-site-reports/puzzles-site-reports.php" 2>/dev/null || true)
+      [[ "$K" =~ $KEY_RE ]] && promoted "$2" "$K" && ! verified "$K" "${F[5]}" "$MSG" && ROT=1
     fi
   fi
   if [ -n "$ROT" ]; then
@@ -237,7 +238,6 @@ if [ -n "$ROTATE" ]; then
   OWN=$(printf 'pub\n%s\n' "$NEWKEY" | crypto); [[ "$OWN" =~ $KEY_RE ]] || die "PUZZLES_SR_NEW_SIGNING_KEY is not a base64 Ed25519 secret key"
   [ "$OWN" != "$PUB" ] || die "--rotate, but the new key is the current one"
 fi
-ROTHINT="A key rotation involved? README, Release."
 # The floor: the highest version this machine promoted and did not pull.
 FLOOR=$([ ! -f "$NOTE" ] || cut -d' ' -f1 "$NOTE" | grep -vxF -f <(cat "$PULLED" 2>/dev/null) | sort -V | tail -1 || true)
 note() { # note <version> <sha256>: one more promotion of this machine, no longer pulled
@@ -259,16 +259,16 @@ for t in "${TAGS[@]}"; do
   [ "$t" != "$TAG" ] && promoted "$t" "$BK" && { BASE=$t; RSHA=${F[1]}; break; }
 done
 if [ -z "$BASE" ]; then
-  [ -z "$LATEST" ] || die "no release has an owner.sig that verifies with $BK, so GitHub's latest, $LATEST, is not one you promoted. $ROTHINT"
+  [ -z "$LATEST" ] || die "no release has an owner.sig that verifies with $BK, so GitHub's latest, $LATEST, is not one you promoted. A key rotation involved? README, Release."
   [ -n "$FIRST" ] || die "GitHub has no latest release and none you promoted: pass --first if this is the first promotion (everything shows as new)"
   [ -z "$ROTATE$BASEKEY" ] || die "--rotate or --baseline-key, but no release was promoted yet"
   [ -z "$FLOOR" ] || die "--first, but this machine promoted $FLOOR and did not pull it ($NOTE): find out where that release went"
   TRUSTED=$PUB; BL="none (--first): everything is new"
 else
   [ -z "$FIRST" ] || die "--first, but $BASE is a release you promoted"
-  ! pulled "${BASE#v}" || die "the newest release you promoted, $BASE, was pulled on this machine, yet it is still signed (a rotation release keeps its manifest): serve its sites with --baseline-key <old public key>, or the others as usual (README, Release)"
+  ! pulled "${BASE#v}" || die "the newest release you promoted, $BASE, was pulled on this machine, yet it is still signed (a rotation release keeps its manifest): serve its sites with --baseline-key <old public key>, or the others as usual (README, Release); or finish the pull: wp-sr-promote pull $BASE (add --delete-manifest if it is not a rotation release)"
   [ "$LATEST" = "$BASE" ] || [ "$LATEST" = "$TAG" ] \
-    || die "GitHub's latest release is ${LATEST:-none}, but the newest release you promoted (owner.sig by $BK) is $BASE: finish it (rerun its promotion) or pull it (README, Release), or mark it latest again once you know why. $ROTHINT"
+    || die "GitHub's latest release is ${LATEST:-none}, but the newest release you promoted (owner.sig by $BK) is $BASE: finish it (rerun its promotion) or pull it (README, Release), or mark it latest again once you know why. A key rotation involved? README, Release."
   BL="$BASE (owner.sig verified, GitHub's latest)"
   (cd "$W" && zipx "$BASE" "r/$BASE/puzzles-site-reports.zip" base)
   TRUSTED=$(key_in "$W/base/puzzles-site-reports/puzzles-site-reports.php")
@@ -282,7 +282,7 @@ else
       || die "--baseline-key: the newest release you promoted with your key, $REF, is not a rotation from $BASEKEY to it (shipping your key, its manifest signed by $BASEKEY)"
     TRUSTED=$PUB; BL+="; the sites that took the rotation release $REF trust your key"
   fi
-  for r in "$BASE" ${BASEKEY:+"$REF"}; do
+  for r in "$BASE" ${BASEKEY:+"$REF"}; do # sort -VCu: strictly newer; the floor below uses -VC: at least
     printf '%s\n' "${r#v}" "$V" | sort -VCu || die "$TAG is not newer than $r, a release you promoted"
   done
   if [ -s "$NOTE" ]; then

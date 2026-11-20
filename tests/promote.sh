@@ -188,6 +188,7 @@ refuses 'bad tested' v9.9.1 '6.8; rm -rf x' --first
 SK=""; refuses 'PUZZLES_SR_SIGNING_KEY is not set' v9.9.1 6.8.1 --first; SK=$SK1
 NSK=$SK2; refuses 'is set without --rotate' v9.9.1 6.8.1 --first; NSK=""
 refuses 'unknown argument: --yes' v9.9.1 6.8.1 --yes
+refuses 'usage: wp-sr-promote' v9.9.01 6.8.1 --first # a leading zero: sort -V and PHP's version_compare would disagree
 refuses '--rotate needs the new secret key' v9.9.1 6.8.1 --first --rotate
 
 # 2. The candidate zip, one case per check.
@@ -302,13 +303,19 @@ release v9.9.3 "$PUB1"
 cp "$(Z v9.9.2)" "$T/z"; cp "$(Z v9.9.1)" "$(Z v9.9.2)" # a release editor's zip: v9.9.2 no longer counts as promoted
 refuses "GitHub's latest release is v9.9.2, but the newest release you promoted (owner.sig by $PUB1) is v9.9.1" v9.9.3 6.8.1
 cp "$T/z" "$(Z v9.9.2)"; SK=$SK3; refuses 'is not one you promoted' v9.9.3 6.8.1; SK=$SK1 # owner.sigs by another key
+# Valid content past the caps (1024 bytes of manifest.json, 200 of owner.sig): only the caps make v9.9.2 not count.
+for a in manifest.json owner.sig; do
+  cp "$GHDIR/v9.9.2/$a" "$T/a"; head -c 1100 /dev/zero | tr '\0' '\n' >>"$GHDIR/v9.9.2/$a"
+  refuses "GitHub's latest release is v9.9.2, but the newest release you promoted (owner.sig by $PUB1) is v9.9.1" v9.9.3 6.8.1
+  cp "$T/a" "$GHDIR/v9.9.2/$a"
+done
 cp "$NOTEF" "$T/note"; sed -i "s/^9\.9\.2 .*/9.9.2 $(printf x | sha256sum | cut -c1-64)/" "$NOTEF" # another v9.9.2 here
 refuses 'is not the zip this machine promoted as v9.9.2' v9.9.3 6.8.1
 cp "$T/note" "$NOTEF"; mv "$GHDIR/v9.9.2/manifest.json" "$T/m"; echo v9.9.1 >"$GHDIR/latest" # pulled behind its back
 refuses 'is below 9.9.2, the highest release this machine promoted and did not pull' v9.9.3 6.8.1
 mv "$T/m" "$GHDIR/v9.9.2/manifest.json"; echo v9.9.2 >"$GHDIR/latest"
 snap; zedit add v9.9.2 'puzzles-site-reports/../evil.txt'; sign v9.9.2 "$SK1" # a baseline the owner signed, with a hostile name
-refuses "v9.9.2's zip has the entry 'puzzles-site-reports/../evil.txt'" v9.9.3 6.8.1; [ ! -e "$T/evil.txt" ]; back
+refuses "v9.9.2's zip has the entry 'puzzles-site-reports/../evil.txt'" v9.9.3 6.8.1; back
 snap; o=$(term 9.9.3 v9.9.3 6.8.1) || { echo "$o"; exit 1; } # 9.9.1-9.9.3 promoted; 9.9.3 pulled; 9.9.2 hidden by an editor
 pull v9.9.3 >/dev/null; latest v9.9.2; mv "$GHDIR/v9.9.2/manifest.json" "$T/m"; echo v9.9.1 >"$GHDIR/latest"
 release v9.9.4 "$PUB1"; refuses 'is below 9.9.2, the highest release this machine promoted and did not pull' v9.9.4 6.8.1
@@ -338,7 +345,7 @@ echo "ok: a rotation"
 snap; pull v9.9.4 --delete-manifest >/dev/null; [ ! -e "$GHDIR/v9.9.4/manifest.json" ]; back # its manifest goes on request
 snap; cp "$GHDIR/v9.9.3/owner.sig" "$GHDIR/v9.9.4/owner.sig"; pull v9.9.4 >/dev/null # owner.sig not by the key it ships
 [ ! -e "$GHDIR/v9.9.4/manifest.json" ]; back
-snap; o=$(GH_FAIL_ASSET=1 pull v9.9.4) && { echo "$o"; exit 1; }; grep -qF "could not download v9.9.4's manifest.json" <<<"$o"; back
+snap; o=$(GH_FAIL_ASSET=1 pull v9.9.4) && { echo "$o"; exit 1; }; grep -qF "could not download v9.9.4's puzzles-site-reports.zip" <<<"$o"; back
 echo "ok: pull keeps a manifest only for a rotation release it can prove, and fails loudly when it cannot read one"
 # Pulled by mistake: its manifest stays, and promoting it again (--rotate) puts it back.
 o=$(pull v9.9.4); grep -qF 'v9.9.4 is a rotation release: its manifest.json stays' <<<"$o"

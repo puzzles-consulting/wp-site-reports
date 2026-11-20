@@ -76,7 +76,8 @@ mkdir -p ~/bin && git -C <clone> show <sha>:scripts/wp-sr-promote >~/bin/wp-sr-p
 The baseline of each review is the newest release you promoted (its `owner.sig`, your key over its manifest,
 verifies), which must also be GitHub's latest and not a release this machine pulled. The promoter lists every
 promotion in `~/.config/wp-sr-promote/promoted` and every pull in `.../pulled`, and refuses a baseline below the
-highest release it promoted and did not pull; without the list (a new machine) it says the baseline comes from GitHub
+highest release it promoted and did not pull, and a release that is not newer than every one it pulled (but
+itself); without the list (a new machine) it says the baseline comes from GitHub
 only. A promotion uploads `manifest.json` (signed with the key the sites trust) and
 `owner.sig`, and marks the release latest; a rerun finishes an interrupted one.
 
