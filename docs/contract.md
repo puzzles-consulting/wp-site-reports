@@ -29,6 +29,7 @@ Reads what WordPress already knows. It never triggers an update check or a Wordf
   "mustUse": [ { "file": "example-mu.php", "name": "...", "version": "..." } ],
   "themes": [ { "stylesheet": "astra-child", "name": "Astra Child", "version": "1.0", "active": true,
                 "parent": "astra", "update": null } ],
+  "updatesCheckedAt": "2026-11-18T03:10:00Z",
   "wordfence": { "version": "8.0.1", "active": true, "lastScanAt": "2026-11-17T09:00:00Z",
                  "issues": [ { "type": "wfPluginUpgrade", "severity": 75, "shortMsg": "...", "detectedAt": "2026-11-16T09:00:00Z" } ],
                  "ignored": 3 },
@@ -37,7 +38,7 @@ Reads what WordPress already knows. It never triggers an update check or a Wordf
 ```
 
 - `update` (core, plugins, themes) is the version WordPress' own update data offers, or `null` for none.
-- `updatesCheckedAt` is the oldest last check of WordPress' update checks in use, in UTC (`...Z`): the plugin and theme checks always, core's only while it holds offers. A site that disables core's check, or whose first core check failed, has none; then `wordpress.update` is `null` and means "unknown", and the time comes from the other two. `updatesCheckedAt` is `null` until the plugin and theme checks have each succeeded once (a failed check stores no data); then every `update` means "unknown", never "up to date". A later failed check still moves the time while the data stays as the last successful check left it, so the data can be older than `updatesCheckedAt`. The plugin never triggers an update check.
+- `wordpress.updatesCheckedAt` is when core's update check last ran, and `updatesCheckedAt` the older of the plugin and theme checks, in UTC (`...Z`). `null` means the check has not succeeded yet (or, for core, is disabled): the `update` values it covers then mean "unknown", never "up to date". A later failed check moves the time but not the data. The plugin never triggers an update check.
 - `active` is a boolean; a network-active plugin counts as active. `autoUpdate` is true when the plugin is in WordPress' auto-update list, and only that: this plugin always installs its own updates, even when its own entry reads `false`.
 - `mustUse` carries only `file`, `name` and `version`. A theme's `parent` is its parent's stylesheet, `null` when it has none; `active` is the stylesheet in use.
 - `wordfence`:

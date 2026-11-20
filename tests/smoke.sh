@@ -100,6 +100,7 @@ call() { # call <route> [token] -> HTTP status; the body lands in out/<route>.js
   local h=(); [ -z "${2:-}" ] || h=(-H "X-Puzzles-Reports-Token: $2")
   curl -s -o "out/$1.json" -w '%{http_code}' "${h[@]}" "http://localhost:8080/?rest_route=/puzzles-reports/v1/$1&_=$(date +%s%N)"
 }
+st() { [ "$(call status "$t")" = 200 ] && jq -e "$1" out/status.json; } # st <jq filter>: /status with token $t holds it
 delete_update_transients() { # forces the never-checked state
   for t in update_core update_plugins update_themes; do wpcli transient delete "$t" --network >/dev/null 2>&1 || true; done
 }
@@ -199,7 +200,7 @@ case_status_fresh() { # no update check has run yet, then only failed ones
   delete_update_transients
   t=$(fresh_token); [ "$(call status "$t")" = 200 ]
   jq -e '.companion.version == env.EXPECTED_VERSION' out/status.json
-  jq -e '.wordpress.updatesCheckedAt == null and ([.plugins[].update] | all(. == null))' out/status.json
+  jq -e '.wordpress.updatesCheckedAt == null and .updatesCheckedAt == null and ([.plugins[].update] | all(. == null))' out/status.json
   jq -e '.php.version | test("^8\\.3\\.")' out/status.json
   jq -e '.plugins[] | select(.file == "puzzles-site-reports/puzzles-site-reports.php") | .active == true' out/status.json
   jq -e '.wordfence == null and .comments.defaultStatus == "open"' out/status.json
@@ -208,19 +209,17 @@ case_status_fresh() { # no update check has run yet, then only failed ones
   offline
   wpcli eval 'wp_update_plugins(); wp_update_themes(); wp_version_check();'
   [ "$(wpcli eval 'echo (int) ! empty( get_site_transient( "update_plugins" )->last_checked );' | tr -d '\r\n')" = 1 ]
-  [ "$(call status "$t")" = 200 ]
-  jq -e '.wordpress.updatesCheckedAt == null' out/status.json
+  st '.wordpress.updatesCheckedAt == null and .updatesCheckedAt == null'
   rm_mu psr-offline.php; delete_update_transients
 }
 
-case_status_checked_per_transient() { # each check judged on its own; core's only while it holds offers
+case_status_checked_per_transient() { # core's check, and the plugin and theme checks, each judged on its own
   t=$(fresh_token)
-  fake_checks 1 1 1; [ "$(call status "$t")" = 200 ]
-  jq -e '.wordpress.updatesCheckedAt == "1970-01-01T00:16:40Z"' out/status.json # the oldest: core's
-  fake_checks 0 1 1; [ "$(call status "$t")" = 200 ]                           # core's check disabled: no offers
-  jq -e '.wordpress.updatesCheckedAt == "1970-01-01T00:33:20Z" and .wordpress.update == null' out/status.json
-  fake_checks 1 0 1; [ "$(call status "$t")" = 200 ]; jq -e '.wordpress.updatesCheckedAt == null' out/status.json
-  fake_checks 1 1 0; [ "$(call status "$t")" = 200 ]; jq -e '.wordpress.updatesCheckedAt == null' out/status.json
+  C='"1970-01-01T00:16:40Z"'; PT='"1970-01-01T00:33:20Z"' # core's 1000; plugins' 2000, older than themes' 3000
+  fake_checks 1 1 1; st ".wordpress.updatesCheckedAt == $C and .updatesCheckedAt == $PT"
+  fake_checks 0 1 1; st ".wordpress.updatesCheckedAt == null and .wordpress.update == null and .updatesCheckedAt == $PT" # core's disabled
+  fake_checks 1 0 1; st ".wordpress.updatesCheckedAt == $C and .updatesCheckedAt == null"
+  fake_checks 1 1 0; st ".wordpress.updatesCheckedAt == $C and .updatesCheckedAt == null"
   delete_update_transients
 }
 
@@ -229,9 +228,8 @@ case_status_later_failed_check() { # a check that fails after a good one moves t
   fake_checks 1 1 1
   offline
   wpcli eval 'wp_update_plugins(); wp_update_themes(); wp_version_check();'
-  [ "$(call status "$t")" = 200 ]
-  jq -e '.wordpress.updatesCheckedAt > "2000"' out/status.json
-  jq -e '.plugins[] | select(.file == "hello.php") | .update == "9.9"' out/status.json
+  st '(.wordpress.updatesCheckedAt | . != null and . != "1970-01-01T00:16:40Z") and (.updatesCheckedAt | . != null and . != "1970-01-01T00:33:20Z")'
+  st '.plugins[] | select(.file == "hello.php") | .update == "9.9"'
   rm_mu psr-offline.php; delete_update_transients
 }
 
@@ -287,7 +285,7 @@ Version: 1.2.3
   o=$(short 'Found<code>/etc/passwd</code>'); [ "$o" = Found ]
   o=$(short 'Found<code>/var/wwwdata/x</code>'); [ "$o" = Found ]
   o=$(short '=>/opt/x/y'); [ "$o" = '=>' ]
-  jq -e '.wordpress.updatesCheckedAt != null' out/status.json
+  jq -e '.wordpress.updatesCheckedAt != null and .updatesCheckedAt != null' out/status.json
   jq -e '.plugins[] | select(.file == "akismet/akismet.php") | .active == false and .version == "5.0" and (.update | type == "string") and .autoUpdate == true' out/status.json
   jq -e '.plugins[] | select(.file == "puzzles-site-reports/puzzles-site-reports.php") | .autoUpdate == false' out/status.json
   jq -e '.themes[] | select(.stylesheet == "twentytwentyone") | (.update | type == "string") and .active == false and .parent == null' out/status.json
