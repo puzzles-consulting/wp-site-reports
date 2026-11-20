@@ -50,8 +50,8 @@ The tests (CI runs them): `bash scripts/build.sh <version> && bash tests/smoke.s
 Before a release: the portal accepts the new report shape and is deployed (a promotion reaches every site within
 hours).
 
-1. After `main`'s CI is green, tag `vX.Y.Z` (no leading zeros) on it and push the tag. `.github/workflows/release.yml` builds the zip,
-   smoke-tests it and publishes it as a **pre-release**, with no manifest, so no site is offered it. That workflow only
+1. Once the PR that brought the change is merged with its CI green, tag `vX.Y.Z` (no leading zeros) on `main` and push
+   the tag. `.github/workflows/release.yml` builds the zip, smoke-tests it and publishes it as a **pre-release**, with no manifest, so no site is offered it. That workflow only
    ever makes pre-releases.
 2. Check it on the canary, a remote site with no secrets, never from the machine you promote from
    (`wp --ssh=<canary>` or on its host): `wp plugin install <the pre-release's zip URL> --force`. Before the first
@@ -110,7 +110,8 @@ on every site over SSH, since sites accept updates only from it. It is created b
   promote it with the new key and `--baseline-key <old public key>`, which needs the rotation release still signed, as
   proof.
 
-Branch protection on `main` and restricting who can create `v*` tags on GitHub are still recommended.
+On GitHub, `main` takes changes only through pull requests with green CI, and only organization admins can create,
+move or delete `v*` tags.
 
 ## License
 
