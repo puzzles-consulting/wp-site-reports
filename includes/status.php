@@ -61,14 +61,22 @@ function puzzles_sr_newer( ?string $offer, string $installed ): ?string {
 }
 
 /**
- * Offers: the snapshot taken when core's check was last answered, plus any a filter adds on read (a filter can add an
- * offer, never hide one); without a snapshot, the filtered read alone (contract).
+ * Offers: the snapshot taken when core's check was last answered and the filtered read, the higher per item (a filter
+ * can add or raise an offer, never hide one); without a snapshot, the filtered read alone (contract).
  */
 function puzzles_sr_offers( string $type ): array {
 	$raw  = puzzles_sr_raw_transient( 'update_' . $type );
-	$snap = ! empty( $raw->puzzles_sr_checked ) && is_array( $raw->puzzles_sr_offers ?? null ) ? $raw->puzzles_sr_offers : array();
+	$out  = ! empty( $raw->puzzles_sr_checked ) && is_array( $raw->puzzles_sr_offers ?? null ) ? $raw->puzzles_sr_offers : array();
 	$read = puzzles_sr_offer_versions( $type, get_site_transient( 'update_' . $type ) );
-	return 'core' === $type ? array_merge( $snap, $read ) : $snap + $read;
+	if ( 'core' === $type ) {
+		return array_merge( $out, $read );
+	}
+	foreach ( $read as $key => $v ) {
+		if ( ! isset( $out[ $key ] ) || version_compare( $v, (string) $out[ $key ], '>' ) ) {
+			$out[ $key ] = $v;
+		}
+	}
+	return $out;
 }
 
 /**
@@ -151,11 +159,11 @@ function puzzles_sr_wordfence( array $plugins ): ?array {
 function puzzles_sr_status(): array {
 	$plugin_offer = puzzles_sr_offers( 'plugins' );
 	$theme_offer  = puzzles_sr_offers( 'themes' );
-	$core_update  = null; // the first upgrade offered above the running version, wherever it sat in core's list
+	$wp_version   = get_bloginfo( 'version' );
+	$core_update  = null; // the highest upgrade offered above the running version, snapshot or read
 	foreach ( puzzles_sr_offers( 'core' ) as $v ) {
-		if ( version_compare( $v, get_bloginfo( 'version' ), '>' ) ) {
+		if ( version_compare( $v, $core_update ?? $wp_version, '>' ) ) {
 			$core_update = $v;
-			break;
 		}
 	}
 
@@ -200,7 +208,7 @@ function puzzles_sr_status(): array {
 	return array(
 		'companion'        => array( 'version' => PUZZLES_SITE_REPORTS_VERSION ),
 		'wordpress'        => array(
-			'version'          => get_bloginfo( 'version' ),
+			'version'          => $wp_version,
 			'update'           => $core_update,
 			'updatesCheckedAt' => puzzles_sr_checked_at( 'update_core' ),
 		),

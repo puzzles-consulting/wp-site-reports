@@ -198,7 +198,7 @@ add_action(
 
 // ---- Self-update from GitHub Releases, signed ----
 // Core runs the offer only inside its own update check (cron or admin), never on a front-end request, and caches the
-// answer in the update_plugins transient, so nothing is cached here. Any failure leaves WordPress' answer untouched.
+// answer in the update_plugins transient, so nothing is cached here. Any failure means no offer for this plugin.
 // A manifest counts only when its Ed25519 signature over all its fields verifies with PUZZLES_SR_UPDATE_PUBKEY (top of
 // this file), and the package is installed only when it hashes to the signed sha256. The signing key never lives in
 // GitHub (README, Release): write access to the repository alone cannot ship a zip to the sites.

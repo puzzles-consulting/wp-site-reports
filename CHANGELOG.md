@@ -17,7 +17,7 @@ The first release offered to sites (1.0.0 was a pre-release only).
 - A token connection from Tools > Site Reports or `wp puzzles-site-reports connect`, stored only as its SHA-256 hash.
   Every request also carries `_`, 32 lowercase hex fresh per request, so no cache can serve a report to another.
 - Signed self-update from this repository's GitHub Releases, installed only when the download matches the SHA-256 that
-  the release key (never in GitHub) signed; any other package for this plugin is refused at download. No email when
+  the release key (never in GitHub) signed; any other update package for this plugin is refused at download (an admin can still install over it by hand). No email when
   an automatic run only updated this plugin, successfully.
 - Wordfence messages in `/status` carry no server path (absolute paths and every URL but an http(s) one are dropped),
   and issues that would name a user (easy passwords, suspicious admin users) carry a fixed text.

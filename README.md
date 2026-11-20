@@ -28,11 +28,11 @@ once, and creating a new connection stops the previous one at once. The routes a
 
 The plugin updates itself from this repository's GitHub Releases through WordPress' own update check
 (the header's `Update URI`), and installs its own updates automatically, without an email when a run only updated
-this plugin and succeeded. Any other source's package for it is refused at download, and never forced to
-auto-install. The check reads
+this plugin and succeeded. Any other source's update package for it is refused at download, and never forced to
+auto-install (an admin can still install over it by hand). The check reads
 `https://github.com/puzzles-consulting/wp-site-reports/releases/latest/download/manifest.json`, which GitHub
 resolves to the newest release that is **not** a pre-release. It runs only inside WordPress' update check (cron or
-admin), never on a front-end request, and any failure leaves WordPress' own answer untouched.
+admin), never on a front-end request, and any failure means no offer for this plugin; other plugins are untouched.
 
 Updates are signed. The manifest is `{ version, sha256, requires, requires_php, tested, signature }`: `signature` is an
 Ed25519 signature by the release key of the five other fields joined by one newline each, in that order

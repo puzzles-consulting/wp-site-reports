@@ -319,6 +319,11 @@ case_status_offers() { # offers: the answered check's snapshot, plus what a filt
   put_mu psr-lower.php '<?php add_filter( "site_transient_update_plugins", function ( $v ) { if ( is_object( $v ) ) { $v->response["hello.php"] = (object) array( "new_version" => "1.0" ); } return $v; } );'
   st '[.plugins[] | select(.file == "hello.php") | .update] == [null]'
   rm_mu psr-lower.php
+  # a snapshot never shadows a higher offer read later (hello.php snapshotted at 9.9, read at 10.1)
+  fake_checks 1 1 1
+  put_mu psr-raise.php '<?php add_filter( "site_transient_update_plugins", function ( $v ) { if ( is_object( $v ) ) { $v->response["hello.php"] = (object) array( "new_version" => "10.1" ); } return $v; } );'
+  st '[.plugins[] | select(.file == "hello.php") | .update] == ["10.1"]'
+  rm_mu psr-raise.php
   # an update disabler answering core's transient on read: the stored stamp is not refreshed, the snapshot still offers
   wpcli eval 'set_site_transient( "update_core", (object) array( "last_checked" => 1000, "version_checked" => get_bloginfo( "version" ), "updates" => array(), "puzzles_sr_checked" => 1000, "puzzles_sr_offers" => array( "99.0" ) ) );'
   put_mu psr-disabler.php '<?php add_filter( "pre_site_transient_update_core", function () { return (object) array( "last_checked" => time(), "version_checked" => get_bloginfo( "version" ), "updates" => array() ); } );'
@@ -514,7 +519,7 @@ case_auto_update_email() { # a successful automatic update of only this plugin s
 
 case_update_offer() { # manifests signed by this run's throwaway key, served by the wp container (reached as http://wp)
   ours=puzzles-site-reports/puzzles-site-reports.php
-  # the release zip asks GitHub (offline here): no offer, core's answer untouched
+  # the release zip asks GitHub (offline here): no offer (false)
   [ "$(wpcli eval "echo wp_json_encode( puzzles_sr_update_offer( 'input', array( 'Version' => '1.0.0' ), '$ours', array() ) );" | tr -d '\r\n')" = false ]
   # from here on, the test build: the same tree with its update constants pointed at this stack and this run's key
   wpcli plugin install /out/testzip/puzzles-site-reports.zip --force --activate
@@ -632,8 +637,9 @@ for case_fn in "${CASES[@]}"; do # not $c: the cases set globals (case_seo_with_
   echo "ok $case_fn"
 done
 # WP_DEBUG_LOG (docker-compose.yml): no warning, notice, deprecation or error from this plugin's own files
-if [ -f out/debug.log ] && grep -E 'PHP (Warning|Notice|Deprecated|Fatal error|Parse error)' out/debug.log | grep -q 'plugins/puzzles-site-reports/'; then
-  grep -E 'PHP (Warning|Notice|Deprecated|Fatal error|Parse error)' out/debug.log | grep 'plugins/puzzles-site-reports/' >&2
-  echo "FAIL: the plugin logged PHP problems (out/debug.log)" >&2; exit 1
+# One grep, no pipe: under pipefail, `grep | grep -q` on a large log fails with SIGPIPE and the check would pass.
+bad=$(grep -E 'PHP (Warning|Notice|Deprecated|Fatal error|Parse error).*plugins/puzzles-site-reports/' out/debug.log 2>/dev/null || true)
+if [ -n "$bad" ]; then
+  printf '%s\n' "$bad" >&2; echo "FAIL: the plugin logged PHP problems (out/debug.log)" >&2; exit 1
 fi
 echo "smoke: all ${#CASES[@]} cases passed"

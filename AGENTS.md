@@ -14,7 +14,7 @@ bash tests/promote.sh                                     # promotions need scri
 `smoke.sh` tears its Docker stack down on exit, also on failure: never leave containers running. CI runs `php -l` on
 7.4 and 8.4 plus both tests, and the smoke on a WordPress/PHP matrix (`smoke-matrix`: 5.8/7.4 to 7.1/8.4,
 weekly too). It fails on any PHP warning, notice or deprecation the plugin's files log (`tests/out/debug.log`).
-`main` is protected (PR with the CI checks required, no force-push), so CI runs on every PR, docs-only ones included
+`main` is protected (PR with the CI checks required, the matrix through its `smoke matrix` job; no force-push), so CI runs on every PR, docs-only ones included
 (why: `ci.yml`).
 
 ## Hard rules
