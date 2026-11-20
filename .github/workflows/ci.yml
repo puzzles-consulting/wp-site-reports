@@ -1,10 +1,10 @@
 name: CI
 on:
   pull_request:
-    paths-ignore: ['docs/**', '.claude/**', 'AGENTS.md']
+    paths-ignore: ['docs/**', '.claude/**', 'AGENTS.md', 'README.md', 'CHANGELOG.md'] # none of them ships
   push:
     branches: [main]
-    paths-ignore: ['docs/**', '.claude/**', 'AGENTS.md']
+    paths-ignore: ['docs/**', '.claude/**', 'AGENTS.md', 'README.md', 'CHANGELOG.md']
 
 permissions:
   contents: read

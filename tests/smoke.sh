@@ -32,6 +32,9 @@ put_mu() { # put_mu <file> <php>: writes a must-use plugin (base64 through wp ev
   wpcli eval "wp_mkdir_p( WPMU_PLUGIN_DIR ); file_put_contents( WPMU_PLUGIN_DIR . '/$1', base64_decode( '$b' ) );"
 }
 rm_mu() { wpcli eval "unlink( WPMU_PLUGIN_DIR . '/$1' );"; } # rm_mu <file>
+offline() { # api.wordpress.org unreachable until rm_mu psr-offline.php
+  put_mu psr-offline.php '<?php add_filter( "pre_http_request", function ( $r, $a, $u ) { return false !== strpos( $u, "api.wordpress.org" ) ? new WP_Error( "offline", "offline" ) : $r; }, 10, 3 );'
+}
 
 # A throwaway Ed25519 keypair signs this run's manifests. case_update_offer installs a test build of the same tree whose
 # update constants point at this stack and this key (scripts/build.sh --test-overrides); the release zip keeps the real ones.
@@ -99,6 +102,13 @@ call() { # call <route> [token] -> HTTP status; the body lands in out/<route>.js
 }
 delete_update_transients() { # forces the never-checked state
   for t in update_core update_plugins update_themes; do wpcli transient delete "$t" --network >/dev/null 2>&1 || true; done
+}
+fake_checks() { # fake_checks <core offers 0|1> <plugins checked 0|1> <themes checked 0|1>: the transients as checks leave
+  # them, last checked at 1000 (core), 2000 (plugins) and 3000 (themes); hello.php is offered 9.9
+  wpcli eval "
+    set_site_transient( 'update_core', (object) array( 'last_checked' => 1000, 'version_checked' => get_bloginfo( 'version' ), 'updates' => $1 ? array( (object) array( 'response' => 'latest', 'current' => get_bloginfo( 'version' ) ) ) : array() ) );
+    set_site_transient( 'update_plugins', (object) array( 'last_checked' => 2000, 'checked' => $2 ? array( 'hello.php' => '0.1' ) : array(), 'response' => array( 'hello.php' => (object) array( 'new_version' => '9.9' ) ) ) );
+    set_site_transient( 'update_themes', (object) array( 'last_checked' => 3000, 'checked' => $3 ? array( 'twentytwentyfive' => '0.1' ) : array(), 'response' => array() ) );"
 }
 
 # ---- cases (plain functions; run in the fixed order of CASES at the bottom) ----
@@ -195,11 +205,33 @@ case_status_fresh() { # no update check has run yet, then only failed ones
   jq -e '.wordfence == null and .comments.defaultStatus == "open"' out/status.json
   ! grep -q '/var/www' out/status.json || return 1
   # checks that fail (api.wordpress.org unreachable) stamp last_checked but store nothing: still unknown
-  put_mu psr-offline.php '<?php add_filter( "pre_http_request", function ( $r, $a, $u ) { return false !== strpos( $u, "api.wordpress.org" ) ? new WP_Error( "offline", "offline" ) : $r; }, 10, 3 );'
+  offline
   wpcli eval 'wp_update_plugins(); wp_update_themes(); wp_version_check();'
   [ "$(wpcli eval 'echo (int) ! empty( get_site_transient( "update_plugins" )->last_checked );' | tr -d '\r\n')" = 1 ]
   [ "$(call status "$t")" = 200 ]
   jq -e '.wordpress.updatesCheckedAt == null' out/status.json
+  rm_mu psr-offline.php; delete_update_transients
+}
+
+case_status_checked_per_transient() { # each check judged on its own; core's only while it holds offers
+  t=$(fresh_token)
+  fake_checks 1 1 1; [ "$(call status "$t")" = 200 ]
+  jq -e '.wordpress.updatesCheckedAt == "1970-01-01T00:16:40Z"' out/status.json # the oldest: core's
+  fake_checks 0 1 1; [ "$(call status "$t")" = 200 ]                           # core's check disabled: no offers
+  jq -e '.wordpress.updatesCheckedAt == "1970-01-01T00:33:20Z" and .wordpress.update == null' out/status.json
+  fake_checks 1 0 1; [ "$(call status "$t")" = 200 ]; jq -e '.wordpress.updatesCheckedAt == null' out/status.json
+  fake_checks 1 1 0; [ "$(call status "$t")" = 200 ]; jq -e '.wordpress.updatesCheckedAt == null' out/status.json
+  delete_update_transients
+}
+
+case_status_later_failed_check() { # a check that fails after a good one moves the time and keeps the data
+  t=$(fresh_token)
+  fake_checks 1 1 1
+  offline
+  wpcli eval 'wp_update_plugins(); wp_update_themes(); wp_version_check();'
+  [ "$(call status "$t")" = 200 ]
+  jq -e '.wordpress.updatesCheckedAt > "2000"' out/status.json
+  jq -e '.plugins[] | select(.file == "hello.php") | .update == "9.9"' out/status.json
   rm_mu psr-offline.php; delete_update_transients
 }
 
@@ -407,6 +439,8 @@ case_update_offer() { # manifests signed by this run's throwaway key, served by 
   manifest 9.9.9 "$sha" "$KP" "" "'requires_php' => '7'"; not_offered                      # signed, a shorthand (X.Y at least)
   manifest 9.9.9-beta "$sha"; not_offered                                                   # not X.Y.Z, though signed
   manifest 9.9.9 "$(tr a-f A-F <<<"$sha")"; not_offered                                     # not lowercase hex, though signed
+  manifest 9.9.9 "$sha" "$KP" "'pad' => str_repeat( 'x', 5000 )"; not_offered             # signed, but over 4 KB: cut
+  manifest 9.9.9 "$sha" "$KP" "'pad' => str_repeat( 'x', 3000 )"; check; o=$(offered); [ "$o" = 9.9.9 ] # under 4 KB
   wpcli eval 'file_put_contents( ABSPATH . "test-manifest.json", "not json" );'; not_offered
 
   wpcli eval 'touch( WP_PLUGIN_DIR . "/puzzles-site-reports/psr-marker" );'

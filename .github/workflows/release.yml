@@ -1,5 +1,5 @@
 name: Release
-# A `vX.Y.Z` tag on main (CI has linted it): build, smoke on that exact zip, then a PRE-release of the zip alone. This
+# A `vX.Y.Z` tag on main: lint on PHP 7.4, build, smoke on that exact zip, then a PRE-release of the zip alone. This
 # workflow only ever makes pre-releases: no site sees one until the owner signs and promotes it (README, Release).
 on:
   push:
@@ -21,6 +21,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '7.4' # the floor: the tag itself, whatever CI saw on main
+      - run: find . -name '*.php' -not -path './tests/*' -print0 | xargs -0 -n1 php -l
       # The plain build, no --test-overrides: the zip the owner reviews and signs (scripts/wp-sr-promote).
       - run: bash scripts/build.sh "${TAG#v}"
       - run: bash tests/smoke.sh

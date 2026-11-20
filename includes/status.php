@@ -14,16 +14,20 @@ function puzzles_sr_iso( $ts ): ?string {
 }
 
 /**
- * The oldest last_checked of the three update checks, or null until each has succeeded once: a failed check still
- * stamps last_checked but stores no data (core: no `updates`; plugins and themes: no `checked`). After a later failure
- * the time is that of the failed check and the data is older.
+ * The oldest last_checked of the update checks in use, or null until the plugin and theme checks have each succeeded
+ * once. A check that fails still stamps last_checked but stores no data (plugins and themes: no `checked`). Core's
+ * check counts only when it holds offers (`updates`): a site that disables it, or whose first one failed, has none,
+ * and its `wordpress.update` says nothing. After a later failure the time is the failed check's and the data older.
  */
 function puzzles_sr_updates_checked_at( $core, $plugins, $themes ): ?string {
-	if ( empty( $core->updates ) || empty( $plugins->checked ) || empty( $themes->checked )
-		|| empty( $core->last_checked ) || empty( $plugins->last_checked ) || empty( $themes->last_checked ) ) {
+	if ( empty( $plugins->checked ) || empty( $themes->checked ) || empty( $plugins->last_checked ) || empty( $themes->last_checked ) ) {
 		return null;
 	}
-	return puzzles_sr_iso( min( (int) $core->last_checked, (int) $plugins->last_checked, (int) $themes->last_checked ) );
+	$times = array( (int) $plugins->last_checked, (int) $themes->last_checked );
+	if ( ! empty( $core->updates ) && ! empty( $core->last_checked ) ) {
+		$times[] = (int) $core->last_checked;
+	}
+	return puzzles_sr_iso( min( $times ) );
 }
 
 /**
@@ -87,7 +91,7 @@ function puzzles_sr_wordfence( array $plugins ): ?array {
 				'type'        => (string) $i['type'],
 				'severity'    => (int) $i['severity'], // Wordfence's own: 100 critical, 75 high, 50 medium, 25 low
 				'shortMsg'    => puzzles_sr_short_msg( $i['shortMsg'] ),
-				'detectedAt'  => puzzles_sr_iso( $i['time'] ?? null ), // the last full scan that stored the issue
+				'detectedAt'  => puzzles_sr_iso( $i['time'] ?? null ), // when Wordfence last re-stored the issue (contract)
 			);
 		}
 		$out['ignored'] = (int) ( $counts['ignoreP'] ?? 0 ) + (int) ( $counts['ignoreC'] ?? 0 );
@@ -98,7 +102,7 @@ function puzzles_sr_wordfence( array $plugins ): ?array {
 }
 
 function puzzles_sr_status(): array {
-	$core_t      = get_site_transient( 'update_core' );
+	$core_t       = get_site_transient( 'update_core' );
 	$plugins_t    = get_site_transient( 'update_plugins' );
 	$themes_t     = get_site_transient( 'update_themes' );
 	$plugin_offer = $plugins_t->response ?? array();
@@ -141,9 +145,9 @@ function puzzles_sr_status(): array {
 	$active = get_stylesheet();
 	foreach ( wp_get_themes() as $stylesheet => $t ) {
 		$stylesheet = (string) $stylesheet; // a numeric folder name is an integer array key
-		$entry   = (array) ( $theme_offer[ $stylesheet ] ?? array() ); // core stores arrays, a third-party updater may store objects
-		$offer    = is_scalar( $entry['new_version'] ?? null ) ? (string) $entry['new_version'] : null;
-		$template = $t->get_template();
+		$entry      = (array) ( $theme_offer[ $stylesheet ] ?? array() ); // core stores arrays, a third-party updater may store objects
+		$offer      = is_scalar( $entry['new_version'] ?? null ) ? (string) $entry['new_version'] : null;
+		$template   = $t->get_template();
 		$themes[] = array(
 			'stylesheet' => (string) $stylesheet,
 			'name'       => (string) $t->get( 'Name' ),

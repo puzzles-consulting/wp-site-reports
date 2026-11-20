@@ -25,7 +25,7 @@ define( 'PUZZLES_SITE_REPORTS_NAMESPACE', 'puzzles-reports/v1' );
 // --test-overrides).
 define( 'PUZZLES_SITE_REPORTS_MANIFEST_URL', 'https://github.com/puzzles-consulting/wp-site-reports/releases/latest/download/manifest.json' );
 define( 'PUZZLES_SITE_REPORTS_PACKAGE_PREFIX', 'https://github.com/puzzles-consulting/wp-site-reports/releases/download/' );
-// The most the update download reads, in bytes (5 MB); the zip is well under 1 MB.
+// The most the update download reads, in bytes; the zip is well under 1 MB.
 define( 'PUZZLES_SITE_REPORTS_MAX_PACKAGE', 5242880 );
 // Base64 Ed25519 public key of the release signing key. A new key means a release that ships the new public key, signed
 // with the old one (README, Release).
@@ -194,8 +194,7 @@ add_action(
 // answer in the update_plugins transient, so nothing is cached here. Any failure leaves WordPress' answer untouched.
 // A manifest counts only when its Ed25519 signature over all its fields verifies with PUZZLES_SR_UPDATE_PUBKEY (top of
 // this file), and the package is installed only when it hashes to the signed sha256. The signing key never lives in
-// GitHub (README, Release): write access to the repository alone cannot ship a zip to the sites. At most 4 KB of the
-// manifest is read.
+// GitHub (README, Release): write access to the repository alone cannot ship a zip to the sites.
 
 /**
  * The manifest when every signed field is well formed and the signature verifies, else null. The signed message is the
